@@ -1,7 +1,17 @@
-#include <ATen/ATen.h>
-#include <ATen/NativeFunctions.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
+#include <ATen/Dispatch.h>
 #include <ATen/Parallel.h>
+#include <ATen/TensorMeta.h>
 #include <c10/util/irange.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/fractional_max_pool2d_backward_native.h>
+#include <ATen/ops/fractional_max_pool2d_native.h>
+#endif
 
 #include <tuple>
 #include <vector>
@@ -60,13 +70,13 @@ TORCH_META_FUNC(fractional_max_pool2d) (
     " too large relative to input width ", inputW);
 
   if (ndims == 3) {
-    set_output(0, {numPlanes, outputH, outputW}, input.options());
+    set_output_raw_strided(0, {numPlanes, outputH, outputW}, {}, input.options());
     /* indices will contain the locations for each output point */
-    set_output(1, {numPlanes, outputH, outputW}, input.options().dtype(kLong));
+    set_output_raw_strided(1, {numPlanes, outputH, outputW}, {}, input.options().dtype(kLong));
   } else {
-    set_output(0, {numBatch, numPlanes, outputH, outputW}, input.options());
+    set_output_raw_strided(0, {numBatch, numPlanes, outputH, outputW}, {}, input.options());
     /* indices will contain the locations for each output point */
-    set_output(1, {numBatch, numPlanes, outputH, outputW}, input.options().dtype(kLong));
+    set_output_raw_strided(1, {numBatch, numPlanes, outputH, outputW}, {}, input.options().dtype(kLong));
   }
 }
 
@@ -108,9 +118,9 @@ TORCH_META_FUNC(fractional_max_pool2d_backward)(
 
   /* resize */
   if (ndims == 3) {
-    set_output(0, {numPlanes, inputH, inputW}, input.options());
+    set_output_raw_strided(0, {numPlanes, inputH, inputW}, {}, input.options());
   } else {
-    set_output(0, {numBatch, numPlanes, inputH, inputW}, input.options());
+    set_output_raw_strided(0, {numBatch, numPlanes, inputH, inputW}, {}, input.options());
   }
 }
 } // namespace meta

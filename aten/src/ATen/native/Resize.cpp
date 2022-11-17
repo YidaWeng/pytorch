@@ -1,9 +1,16 @@
-#include <ATen/ATen.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
 #include <ATen/native/Resize.h>
 #include <ATen/native/ResizeCommon.h>
+#include <ATen/NamedTensorUtils.h>
 #include <ATen/TensorSubclassLikeUtils.h>
 
-#include <c10/core/TensorOptions.h>
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/resize_as_native.h>
+#include <ATen/ops/resize_native.h>
+#endif
 
 namespace at { namespace native {
 
@@ -43,6 +50,12 @@ bool resize_output(const Tensor& output, IntArrayRef shape) {
   } else {
     return false;
   }
+}
+
+const Tensor& _resize_output_(const Tensor& self, IntArrayRef shape, c10::Device device) {
+  TORCH_CHECK(self.device() == device, "out Tensor doesn't have the correct device set");
+  at::native::resize_output(self, shape);
+  return self;
 }
 
 void resize_bytes_cpu(StorageImpl* storage, size_t size_bytes) {

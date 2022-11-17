@@ -4,7 +4,9 @@
 #include <ATen/BatchedFallback.h>
 #include <ATen/native/ResizeCommon.h>
 #include <ATen/ATen.h>
+#include <ATen/core/IListRef.h>
 #include <c10/util/irange.h>
+#include <c10/core/SymIntArrayRef.h>
 
 namespace at {
 
@@ -56,18 +58,21 @@ static bool is_allowed_dim_on_scalar_tensor(int64_t dim) {
   return dim == 0 || dim == -1;
 }
 
-Tensor sum_batching_rule(const Tensor& self, IntArrayRef dims, bool keepdim, optional<ScalarType> dtype) {
-  // PyTorch has a special case where sum(scalar_tensor, dim=0) does not fail
-  // and instead returns a new scalar tensor (this also happens for dim=-1)
-  // If the following happens:
-  // >>> x = torch.randn(B0)  # the per-examples are all scalars
-  // >>> vmap(partial(torch.sum, dim=0), x)
-  // then we replicate the behavior of sum(scalar_tensor, dim=0).
-  if (/*logical*/self.dim() == 0 && (dims.size() == 0 || (dims.size() == 1 && is_allowed_dim_on_scalar_tensor(dims[0])))) {
-    return self.clone();
+Tensor sum_batching_rule(const Tensor& self, OptionalIntArrayRef opt_dims, bool keepdim, optional<ScalarType> dtype) {
+  if (opt_dims.has_value()) {
+    auto dims = opt_dims.value();
+    // PyTorch has a special case where sum(scalar_tensor, dim=0) does not fail
+    // and instead returns a new scalar tensor (this also happens for dim=-1)
+    // If the following happens:
+    // >>> x = torch.randn(B0)  # the per-examples are all scalars
+    // >>> vmap(partial(torch.sum, dim=0), x)
+    // then we replicate the behavior of sum(scalar_tensor, dim=0).
+    if (/*logical*/self.dim() == 0 && (dims.size() == 0 || (dims.size() == 1 && is_allowed_dim_on_scalar_tensor(dims[0])))) {
+      return self.clone();
+    }
   }
   auto self_physical = MultiBatchVmapTransform::logicalToPhysical(self);
-  auto dims_physical = self_physical.getPhysicalDims(dims);
+  auto dims_physical = self_physical.getPhysicalDims(opt_dims);
   auto result = at::sum(self_physical.tensor(), dims_physical, keepdim, dtype);
   return self_physical.getPhysicalToLogicalMap().apply(result);
 }
@@ -912,7 +917,7 @@ Tensor mm_batching_rule(const Tensor& self, const Tensor& other) {
   TORCH_INTERNAL_ASSERT(false, "either self or other must be a BatchedTensor");
 }
 
-Tensor cat_batching_rule(TensorList tensors, int64_t dim) {
+Tensor cat_batching_rule(const ITensorListRef& tensors, int64_t dim) {
   auto physical_views = MultiBatchVmapTransform::logicalToPhysical(tensors);
   auto physical_tensors = fmap(
       physical_views, [](const VmapPhysicalView& view) -> Tensor { return view.tensor(); });
@@ -1091,9 +1096,9 @@ TORCH_LIBRARY_IMPL(aten, Batched, m) {
   m.impl("expand_as", native::expand_as); // composite wrt autograd
   m.impl("movedim.intlist", movedim_batching_rule);
   m.impl("movedim.int", static_cast<Tensor(*)(const Tensor&,int64_t,int64_t)>(native::movedim)); // composite wrt autograd
-  // NB: static_cast because there's another variant of narrow. However, we don't
+  // There is another variant of narrow.  However, we don't
   // want to support the other variant yet bc it isn't documented...
-  m.impl("narrow", static_cast<Tensor(*)(const Tensor&,int64_t,int64_t,int64_t)>(native::narrow)); // composite wrt autograd
+  m.impl("narrow", native::narrow_symint); // composite wrt autograd
   m.impl("numpy_T", native::numpy_T);   // composite wrt autograd
   m.impl("matrix_H", native::matrix_H); // composite wrt autograd
   m.impl("mT", native::mT);             // composite wrt autograd
@@ -1105,6 +1110,7 @@ TORCH_LIBRARY_IMPL(aten, Batched, m) {
   m.impl("select.int", select_batching_rule);
   m.impl("slice.Tensor", slice_batching_rule);
   m.impl("split.Tensor", split_batching_rule);
+  m.impl("split.sizes", split_with_sizes_batching_rule);
   m.impl("split_with_sizes", split_with_sizes_batching_rule);
   m.impl("squeeze", squeeze_batching_rule);
   m.impl("squeeze.dim", squeeze_dim_batching_rule);

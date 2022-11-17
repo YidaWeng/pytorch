@@ -7,6 +7,7 @@
 #include <torch/csrc/jit/mobile/import.h>
 #include <torch/csrc/jit/mobile/module.h>
 #include <torch/csrc/jit/serialization/export.h>
+#include <torch/csrc/jit/serialization/flatbuffer_serializer_jit.h>
 #include <torch/csrc/jit/serialization/import.h>
 #include <torch/csrc/jit/serialization/pickler.h>
 #include <cstddef>
@@ -75,21 +76,6 @@ void selective_copy(
       writer.writeRecord(record, data, size);
     }
   }
-}
-
-// Copy all content from reader to stringstream
-void get_model_stream(PyTorchStreamReader& reader, std::stringstream& out) {
-  auto writer_func = [&](const void* buf, size_t nbytes) -> size_t {
-    out.write(static_cast<const char*>(buf), nbytes);
-    return !out ? 0 : nbytes;
-  };
-  PyTorchStreamWriter writer(writer_func);
-
-  selective_copy(
-      reader,
-      writer,
-      std::unordered_set<std::string>(),
-      std::unordered_set<std::string>());
 }
 
 // The write_archive_current function is used for bytecode from version v5 to
@@ -518,6 +504,7 @@ std::stringstream backport_v7_to_v6(std::stringstream& input_model_stream) {
 
 std::stringstream backport_v9_to_v8(std::stringstream& input_model_stream) {
   ExtraFilesMap extra_files;
+  register_flatbuffer_all();
   Module torch_script =
       torch::jit::load(input_model_stream, c10::nullopt, extra_files);
   std::stringstream intermediate_model_stream;

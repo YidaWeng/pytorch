@@ -1,10 +1,16 @@
-#include <ATen/ATen.h>
-#include <ATen/native/quantized/packed_params.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/Context.h>
+#include <ATen/Dispatch.h>
+#include <ATen/Utils.h>
+#include <ATen/core/TensorBody.h>
+#include <ATen/core/ivalue.h>
+#include <ATen/core/jit_type_base.h>
+#include <ATen/native/quantized/PackedParams.h>
 #include <ATen/native/quantized/cpu/conv_serialization.h>
-#include <ATen/native/quantized/cpu/embedding_packed_params.h>
+#include <ATen/native/quantized/cpu/EmbeddingPackedParams.h>
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
-#include <ATen/native/quantized/cpu/qnnpack_utils.h>
-#include <ATen/native/quantized/cpu/onednn_utils.h>
+#include <ATen/native/quantized/cpu/QnnpackUtils.h>
+#include <ATen/native/quantized/cpu/OnednnUtils.h>
 #include <ATen/native/TensorFactories.h>
 #include <ATen/quantized/QTensorImpl.h>
 #include <ATen/quantized/Quantizer.h>
@@ -13,6 +19,12 @@
 #include <c10/util/accumulate.h>
 #include <c10/util/irange.h>
 #include <torch/custom_class.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#else
+#include <ATen/ops/cat.h>
+#endif
 
 int register_linear_params();
 int register_embedding_params();
@@ -445,7 +457,8 @@ int register_linear_params() {
                 bias = std::move(std::get<1>(state));
 
 #ifdef USE_FBGEMM
-                if (at::globalContext().qEngine() == at::QEngine::FBGEMM) {
+                if (at::globalContext().qEngine() == at::QEngine::FBGEMM ||
+                    at::globalContext().qEngine() == at::QEngine::X86) {
                   if (weight.scalar_type() == at::kQInt8) {
                     return PackedLinearWeight::prepack(
                         std::move(weight), std::move(bias));
@@ -547,6 +560,7 @@ int register_embedding_params() {
             return PackedEmbeddingBagWeight::prepack(weight);
           })
       .def("bit_rate", &EmbeddingPackedParamsBase::bit_rate)
+      .def("unpack", &EmbeddingPackedParamsBase::unpack)
       .def("version", &EmbeddingPackedParamsBase::version);
 
   return 0;
@@ -554,9 +568,9 @@ int register_embedding_params() {
 
 namespace {
 
-static auto conv2d_params = register_conv_params<2>();
-static auto conv3d_params = register_conv_params<3>();
-static auto linear_params = register_linear_params();
-static auto embedding_params = register_embedding_params();
+static C10_UNUSED auto conv2d_params = register_conv_params<2>();
+static C10_UNUSED auto conv3d_params = register_conv_params<3>();
+static C10_UNUSED auto linear_params = register_linear_params();
+static C10_UNUSED auto embedding_params = register_embedding_params();
 
 } // namespace

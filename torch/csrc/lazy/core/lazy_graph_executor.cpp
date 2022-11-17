@@ -12,12 +12,10 @@
 #include <torch/csrc/lazy/core/unique.h>
 
 #include <torch/csrc/lazy/core/debug_util.h>
+#include <torch/csrc/lazy/core/ir_builder.h>
 #include <torch/csrc/lazy/core/metrics.h>
+#include <torch/csrc/lazy/core/ops/arithmetic_ir_ops.h>
 #include <torch/csrc/lazy/core/thread_pool.h>
-#include <torch/csrc/lazy/ts_backend/ops/arithmetic_ir_ops.h>
-#include <torch/csrc/lazy/ts_backend/ops/device_data.h>
-#include <torch/csrc/lazy/ts_backend/ops/expand.h>
-#include <torch/csrc/lazy/ts_backend/ops/scalar.h>
 
 #include <ATen/ScalarOps.h>
 
@@ -297,8 +295,8 @@ class DeviceContextArena {
     devctx->running_seed = kSeedAdd + kSeedMul * devctx->running_seed;
     // Compose new seeds from the root seed, to avoid creating too many
     // computation parameters which might overflow the device capacity.
-    Value k = MakeNode<Scalar>(MakeIntScalar(kSeedMul), kSeedType);
-    Value b = MakeNode<Scalar>(MakeIntScalar(kSeedAdd), kSeedType);
+    Value k = MakeScalar(MakeIntScalar(kSeedMul), kSeedType);
+    Value b = MakeScalar(MakeIntScalar(kSeedAdd), kSeedType);
     devctx->seed_ir_value = b + k * devctx->seed_ir_value;
     return devctx->seed_ir_value;
   }
@@ -374,16 +372,12 @@ class DeviceContextArena {
     at::Tensor tensor =
         at::scalar_tensor(value, at::TensorOptions(scalar_type));
     BackendDataPtr device_data = TensorToDataHandle(tensor, device);
-    return MakeNode<DeviceData>(std::move(device_data));
+    return MakeDeviceData(std::move(device_data));
   }
 
   std::mutex lock_;
   std::map<BackendDevice, DeviceContext*> device_contexts_;
 };
-
-bool ShouldSyncIrValue(const Value& ir_value) {
-  return ir_value->op() != ltc_not_supported;
-}
 
 // Return true if no tensor in the list has an underlying IR (leaf or
 // operation).
@@ -396,10 +390,15 @@ bool TensorsHaveIR(const std::vector<LazyTensorPtr>& tensors) {
   return false;
 }
 
+std::atomic<LazyGraphExecutor*> lazy_graph_executor_registry;
 } // namespace
 
+void LazyGraphExecutor::Register(LazyGraphExecutor* executor) {
+  lazy_graph_executor_registry.store(executor);
+}
 LazyGraphExecutor* LazyGraphExecutor::Get() {
-  static LazyGraphExecutor* executor = new LazyGraphExecutor();
+  auto* executor = lazy_graph_executor_registry.load();
+  TORCH_CHECK(executor, "Lazy graph executor not registered.");
   return executor;
 }
 
@@ -475,6 +474,8 @@ void LazyGraphExecutor::MarkStep(const BackendDevice& device) {
   DeviceContextArena::Get()->MarkStep(device);
   ScopePusher::ResetScopes();
   g_tls_data.Reset();
+  // Move TrieCache's current pointer back to its root
+  TrieCache::Get()->ResetCurrent();
 }
 
 void LazyGraphExecutor::WaitDeviceOps(c10::ArrayRef<BackendDevice> devices) {
@@ -526,17 +527,20 @@ Value LazyGraphExecutor::GetDeviceDataIrValue(
   BackendDataPtr data = GetDeviceData(value, type, device);
   data->SetInfo(std::make_shared<DeviceDataInfo>(
       /*tensor_id=*/-1, /*read_only=*/true));
-  return MakeNode<DeviceData>(std::move(data));
+  return MakeDeviceData(std::move(data));
 }
 
-Value LazyGraphExecutor::GetIrValueForScalarFromCodegen(const at::Scalar& value) {
+Value LazyGraphExecutor::GetIrValueForScalarFromCodegen(
+    const at::Scalar& value,
+    const BackendDevice& device) {
   if (IsSpecialScalar(value)) {
-    return MakeNode<Scalar>(value, value.type());
+    return MakeScalar(value, value.type());
   }
-  auto cpu_device = getBackend()->GetBackendDevice(c10::Device(c10::kCPU, 0));
-  BackendDataPtr data = getBackend()->MakeComputationDataFromScalar(value, cpu_device);
-  data->SetInfo(std::make_shared<DeviceDataInfo>(/*tensor_id=*/-1, /*read_only=*/true));
-  return MakeNode<DeviceData>(std::move(data));
+  BackendDataPtr data =
+      getBackend()->MakeComputationDataFromScalar(value, device);
+  data->SetInfo(
+      std::make_shared<DeviceDataInfo>(/*tensor_id=*/-1, /*read_only=*/true));
+  return MakeDeviceData(std::move(data));
 }
 
 Value LazyGraphExecutor::GetIrValueForScalar(
@@ -544,9 +548,9 @@ Value LazyGraphExecutor::GetIrValueForScalar(
     c10::ScalarType type,
     const BackendDevice& device) {
   if (IsSpecialScalar(value)) {
-    return MakeNode<Scalar>(value, type);
+    return MakeScalar(value, type);
   }
-  return GetDeviceDataIrValue(value, type, getBackend()->GetBackendDevice(c10::Device(c10::kCPU, 0)));
+  return GetDeviceDataIrValue(value, type, device);
 }
 
 Value LazyGraphExecutor::GetIrValueForScalar(
@@ -556,15 +560,17 @@ Value LazyGraphExecutor::GetIrValueForScalar(
 }
 
 Value LazyGraphExecutor::GetIrValueForExpandedScalar(
-    const at::Scalar& value, const Shape& shape,
+    const at::Scalar& value,
+    const Shape& shape,
     const BackendDevice& device) {
   c10::ArrayRef<int64_t> dimensions = shape.sizes();
   auto type = shape.scalar_type();
   Value ir_value = GetIrValueForScalar(value, type, device);
   if (!dimensions.empty()) {
-      ir_value = MakeNode<Expand>(
-          ir_value, dimensions.vec(),
-          /*is_scalar_expand=*/true);
+    ir_value = MakeExpand(
+        ir_value,
+        dimensions.vec(),
+        /*is_scalar_expand=*/true);
   }
   return ir_value;
 }
@@ -603,6 +609,10 @@ void LazyGraphExecutor::Async::Wait() {
   }
 }
 
+bool LazyGraphExecutor::ShouldSyncTensor(const LazyTensorPtr tensor) const {
+  return tensor->GetIrValue()->op() != ltc_not_supported;
+}
+
 LazyGraphExecutor::SyncTensorCollection LazyGraphExecutor::CollectSyncTensors(
     const std::vector<LazyTensorPtr>& tensors,
     const SyncTensorsConfig& config) {
@@ -628,19 +638,13 @@ LazyGraphExecutor::SyncTensorCollection LazyGraphExecutor::CollectSyncTensors(
   coll.config = config;
   coll.device = *unique_device;
   coll.indices.reserve(tensors.size());
-  VLOG(4) << "Waiting on device barrier for device " << coll.device << " ...";
-  {
-    TORCH_LAZY_TIMED("DeviceLockWait");
-    coll.unlocker =
-        DeviceLockerArena::Get()->LockDevices(unique_device.AsSet());
-  }
-  VLOG(4) << "Waiting on device barrier for device " << coll.device << " done!";
+
   for (const auto i : c10::irange(tensors.size())) {
     if (tensor_ids.insert(tensors[i]->GetUniqueId()).second &&
         tensors[i]->CurrentDataHandle() == nullptr) {
       Value ir_value = tensors[i]->CurrentIrValue();
       if (ir_value) {
-        if (ShouldSyncIrValue(ir_value)) {
+        if (ShouldSyncTensor(tensors[i])) {
           // Add only tensors which need to be synced.
           coll.hash = HashCombine(coll.hash, ir_value.hash());
           coll.indices.push_back(i);
@@ -706,6 +710,7 @@ std::vector<BackendDataPtr> LazyGraphExecutor::FetchTensorData(
       const BackendDevice& tensor_device = tensor->GetDevice();
       handle = getBackend()->CreateDataPlaceholder(
           tensor_device, std::move(tensor->shape()));
+
       tensor->SetDataHandle(handle, config.sync_ltc_data);
     }
     tensors_data.emplace_back(std::move(handle));
@@ -715,10 +720,10 @@ std::vector<BackendDataPtr> LazyGraphExecutor::FetchTensorData(
 
 LazyGraphExecutor::PostOrderData LazyGraphExecutor::RunPostOrder(
     const std::vector<LazyTensorPtr>& tensors,
-    c10::ArrayRef<size_t> indices) {
-  std::vector<Node*> roots;
-  roots.reserve(indices.size());
-  for (auto index : indices) {
+    SyncTensorCollection* coll) {
+  std::vector<const Node*> roots;
+  roots.reserve(coll->indices.size());
+  for (auto index : coll->indices) {
     Value ir_value = tensors.at(index)->CurrentIrValue();
     roots.push_back(ir_value.node.get());
   }
@@ -726,16 +731,21 @@ LazyGraphExecutor::PostOrderData LazyGraphExecutor::RunPostOrder(
   po_data.post_order = Util::ComputePostOrder(roots, &po_data.emission_map);
   std::unordered_map<BackendData::Handle, size_t> data_handles;
   for (auto node : po_data.post_order) {
-    const DeviceData* device_data = DeviceData::Cast(node);
-    if (device_data != nullptr) {
-      BackendData::Handle handle = device_data->data()->GetHandle();
+    const auto backend_data = getBackend()->GetComputationDataFromNode(node);
+    if (backend_data) {
+      /* Acceptable race condition: HasValue may return false. This is OK
+       * since the conditional barrier is a performance optimization. */
+      if (!backend_data->HasValue()) {
+        TensorCollectionBarrier(coll);
+      }
+      BackendData::Handle handle = backend_data->GetHandle();
       auto it = data_handles.find(handle);
       if (it != data_handles.end()) {
         po_data.parameter_sequence.push_back(it->second);
       } else {
         po_data.parameter_sequence.push_back(po_data.parameters_data.size());
         data_handles[handle] = po_data.parameters_data.size();
-        po_data.parameters_data.push_back(device_data->data());
+        po_data.parameters_data.push_back(backend_data);
       }
     }
   }
@@ -752,8 +762,8 @@ std::shared_ptr<LazyGraphExecutor::Async> LazyGraphExecutor::TryRunCachedSync(
     return nullptr;
   }
   if (GRAPH_DUMP_ENABLED) {
-    auto* tscomp = (TSComputation*) cached_computation->computation.get();
-    LOG(ERROR) << "Run a cached graph: " << *tscomp->graph() << std::endl;
+    auto* comp = cached_computation->computation.get();
+    LOG(ERROR) << "Run a cached graph: " << comp->to_string() << std::endl;
   }
   TORCH_LAZY_VALUE_METRIC("TensorsGraphSize", po_data->post_order.size());
   VLOG(5) << "TensorsGraphSize=" << po_data->post_order.size();
@@ -779,35 +789,12 @@ LazyGraphExecutor::CompilationResult LazyGraphExecutor::Compile(
     Value ir_value = tensors[index]->CurrentIrValue();
     lowering_ctx->AddResult(ir_value);
   }
-  if (FLAGS_torch_lazy_param_aliasing && coll.config.sync_ltc_data) {
-    // We can only alias at the step barrier, when force_ltc_data is true.
-    // Consider the case:
-    //   1. Tensor A(DEVICE_DATA)
-    //   2. Tensor B = A + 0.9
-    //   3. A += 0.4
-    // If we activate aliasing for A's graph, and we do:
-    //   print(A)
-    //   print(A)
-    // The first print will update DEVICE_DATA' with DEVICE_DATA+0.4, and the
-    // second print will again update DEVICE_DATA" with DEVICE_DATA'+0.4, which
-    // will lead to incorrect results.
-    // We cannot normally turn A's state into DEVICE_DATA, as if any of the
-    // sources is a view, this will not lead to correct results (as A's value
-    // taken at different times need to reflect view source changes):
-    //   1. Tensor A = some_graph_with_view_source(V)
-    //   2. print(A)
-    //   3. V += 1
-    //   4. print(A)
-    // The second print should reflect the new value due to V's changes.
-    // Also in the first example, unless we are doing a step barrier and hence
-    // include all live tensors, if the B value is not part of the graph, it
-    // will later fetch the new value of A, which is incorrect.
-    // But, when we issue a step barrier (force_ltc_data == true) we have to
-    // turn everything into DEVICE_DATA, so we can activate aliasing.
-    BuildInputOutputAliases(tensors, coll.indices, lowering_ctx.get());
-  }
 
   ComputationPtr computation = lowering_ctx->Build();
+  // If force_ltc_data is true it means that we did a proper sync and are
+  // inside a mark step. If GetTensors was called, force_ltc_data will
+  // be false meaning we are prematurely evaluating some value.
+  computation->in_mark_step = coll.config.force_ltc_data;
 
   VLOG(3) << "Compiling IR graph hash " << HashToString(coll.hash)
           << " on device " << coll.device << " ...";
@@ -852,43 +839,6 @@ LazyGraphExecutor::ComputationCache::TypePtr LazyGraphExecutor::
 typedef SSIZE_T ssize_t;
 #endif
 
-void LazyGraphExecutor::BuildInputOutputAliases(
-    const std::vector<LazyTensorPtr>& tensors,
-    c10::ArrayRef<size_t> indices,
-    LoweringContext* lowering_ctx) {
-  std::unordered_map<int64_t, size_t> output_tensor_id_map;
-  for (const auto i : c10::irange(indices.size())) {
-    size_t tensor_index = indices[i];
-    int64_t tensor_id = tensors[tensor_index]->GetUniqueId();
-    output_tensor_id_map[tensor_id] = i;
-  }
-  const std::vector<BackendDataPtr>& parameters_data =
-      lowering_ctx->GetParametersData();
-  std::vector<ssize_t> alias_map(indices.size(), -1);
-  for (const auto i : c10::irange(parameters_data.size())) {
-    DeviceDataInfo* data_info =
-        dynamic_cast<DeviceDataInfo*>(parameters_data[i]->info());
-    if (data_info != nullptr && !data_info->read_only) {
-      auto it = output_tensor_id_map.find(data_info->tensor_id);
-      if (it != output_tensor_id_map.end()) {
-        size_t output_index = it->second;
-        const Shape& root_shape = lowering_ctx->GetResultShape(output_index);
-        if (Shape(parameters_data[i]->shape()) == root_shape &&
-            alias_map[output_index] < 0) {
-          // TODO(whc) deleted this interface until we see a need (no TS impl)
-          // lowering_ctx->SetUpAlias({static_cast<int64_t>(output_index)}, i,
-          // {});
-          alias_map[output_index] = i;
-
-          VLOG(6) << "Aliased parameter " << i << " with output "
-                  << output_index << ": " << Shape(parameters_data[i]->shape());
-        }
-      }
-    }
-  }
-  TORCH_LAZY_VALUE_METRIC("InputOutputAliasCount", alias_map.size());
-}
-
 std::shared_ptr<LazyGraphExecutor::Async> LazyGraphExecutor::
     SyncTensorsGraphInternal(
         std::vector<LazyTensorPtr>* tensors,
@@ -896,12 +846,14 @@ std::shared_ptr<LazyGraphExecutor::Async> LazyGraphExecutor::
         const SyncTensorsConfig& config) {
   SyncTensorCollection coll = CollectSyncTensors(*tensors, config);
   if (coll.indices.empty()) {
+    /* Enure previous execution is complete before exiting this
+     * function */
+    TensorCollectionBarrier(&coll);
     return nullptr;
   }
-  DebugUtil::SaveTensorsGraphInfo("ScheduleSyncTensorsGraph", *tensors,
-                                 &coll.indices);
-
-  PostOrderData po_data = RunPostOrder(*tensors, coll.indices);
+  PostOrderData po_data = RunPostOrder(*tensors, &coll);
+  DebugUtil::SaveTensorsGraphInfo(
+      "ScheduleSyncTensorsGraph", *tensors, &coll.indices);
   coll.hash = HashCombine(coll.hash, Hash(po_data.parameter_sequence));
   VLOG(4) << "Parameter sequence graph hash " << HashToString(coll.hash);
   std::shared_ptr<Async> async = TryRunCachedSync(tensors, &coll, &po_data);
@@ -911,9 +863,10 @@ std::shared_ptr<LazyGraphExecutor::Async> LazyGraphExecutor::
 
   CompilationResult compile_result = Compile(*tensors, devices, coll, &po_data);
   if (GRAPH_DUMP_ENABLED) {
-    auto* tscomp = (TSComputation*) compile_result.computation.get();
-    LOG(ERROR) << "Add a cached computation with hash " << coll.hash << std::endl;
-    LOG(ERROR) << "Add a graph to cache: " << *tscomp->graph() << std::endl;
+    auto* comp = compile_result.computation.get();
+    LOG(ERROR) << "Add a cached computation with hash " << coll.hash
+               << std::endl;
+    LOG(ERROR) << "Add a graph to cache: " << comp->to_string() << std::endl;
   }
 
   TORCH_LAZY_VALUE_METRIC("TensorsGraphSize", compile_result.emitted_nodes);
@@ -936,6 +889,7 @@ std::shared_ptr<LazyGraphExecutor::Async> LazyGraphExecutor::
         std::vector<BackendDataPtr> parameters_data,
         std::vector<BackendDataPtr> tensors_data,
         ComputationCache::TypePtr cached_computation) {
+  TensorCollectionBarrier(coll);
   std::shared_ptr<Async> async = std::make_shared<Async>(
       coll,
       std::move(parameters_data),
@@ -952,15 +906,18 @@ std::shared_ptr<LazyGraphExecutor::Async> LazyGraphExecutor::
       VLOG(3) << "Executing IR graph hash " << HashToString(hash)
               << " on device " << async->device << " ...";
       auto results = getBackend()->ExecuteComputation(
-          *async->cached_computation->computation,
+          async->cached_computation->computation,
           async->parameters_data,
           async->device);
       VLOG(3) << "Executing IR graph hash " << HashToString(hash)
               << " on device " << async->device << " done!";
 
-      TORCH_CHECK(async->tensors_data.size() == results.size(),
-        "Expected number of outputs does not match TorchScript Stack size: ",
-        async->tensors_data.size(), " != ", results.size());
+      TORCH_CHECK(
+          async->tensors_data.size() == results.size(),
+          "Expected number of outputs does not match TorchScript Stack size: ",
+          async->tensors_data.size(),
+          " != ",
+          results.size());
 
       for (const auto i : c10::irange(results.size())) {
         if (async->tensors_data[i] != nullptr) {
@@ -1052,7 +1009,8 @@ std::vector<at::Tensor> LazyGraphExecutor::FetchTensors(
       ++literals_index;
       ++sync_index;
     } else {
-      c10::optional<at::Tensor> tensor_data = (*tensors)[i]->CurrentTensorData();
+      c10::optional<at::Tensor> tensor_data =
+          (*tensors)[i]->CurrentTensorData();
       if (tensor_data) {
         results.push_back(*tensor_data);
       } else {
@@ -1096,12 +1054,32 @@ std::vector<BackendDataPtr> LazyGraphExecutor::GatherTensorsData(
   return result_tensors_data;
 }
 
-hash_t LazyGraphExecutor::GetGraphHash(const std::vector<LazyTensorPtr>& tensors) {
+void LazyGraphExecutor::TensorCollectionBarrier(SyncTensorCollection* coll) {
+  static const std::string invalid_device(
+      "Unknown0"); /* Temp solution to idetify unassigned devices */
+  if (coll->device.toString().compare(invalid_device) == 0 ||
+      coll->unlocker.size() > 0) {
+    return;
+  }
+  if (coll) {
+    VLOG(4) << "Waiting on device barrier for device " << coll->device
+            << " ...";
+    {
+      TORCH_LAZY_TIMED("DeviceLockWait");
+      coll->unlocker = DeviceLockerArena::Get()->LockDevices({coll->device});
+    }
+    VLOG(4) << "Waiting on device barrier for device " << coll->device
+            << " done!";
+  }
+}
+
+hash_t LazyGraphExecutor::GetGraphHash(
+    const std::vector<LazyTensorPtr>& tensors) {
   SyncTensorsConfig config;
   config.sync_ltc_data = false;
 
   auto coll = CollectSyncTensors(tensors, config);
-  auto po_data = RunPostOrder(tensors, coll.indices);
+  auto po_data = RunPostOrder(tensors, &coll);
   coll.hash = HashCombine(coll.hash, Hash(po_data.parameter_sequence));
   return coll.hash;
 }

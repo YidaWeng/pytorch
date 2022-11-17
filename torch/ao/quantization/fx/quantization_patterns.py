@@ -3,17 +3,30 @@ from torch.fx.graph import (
     Node,
 )
 
-from .pattern_utils import (
-    register_quant_pattern,
-    Pattern,
-)
 from .utils import (
     all_node_args_have_no_tensors,
 )
-from .quantization_types import NodePattern
+from torch.ao.quantization.utils import NodePattern
 
 from abc import ABC
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Dict
+
+__all__ = [
+    "QuantizeHandler",
+    "BinaryOpQuantizeHandler",
+    "CatQuantizeHandler",
+    "ConvReluQuantizeHandler",
+    "LinearReLUQuantizeHandler",
+    "BatchNormQuantizeHandler",
+    "EmbeddingQuantizeHandler",
+    "RNNDynamicQuantizeHandler",
+    "DefaultNodeQuantizeHandler",
+    "FixedQParamsOpQuantizeHandler",
+    "CopyNodeQuantizeHandler",
+    "GeneralTensorShapeOpQuantizeHandler",
+    "CustomModuleQuantizeHandler",
+    "StandaloneModuleQuantizeHandler",
+]
 
 def _default_root_node_getter(node_pattern):
     if node_pattern is None:
@@ -22,12 +35,7 @@ def _default_root_node_getter(node_pattern):
         node_pattern = node_pattern[-1]
     return node_pattern
 
-# -------------------------
-# Pattern Registrations
-# -------------------------
-
-# 1. Post Training Static Quantization and Quantization Aware Training Patterns
-
+# TODO: move to backend_config_utils.py
 # Base Pattern Handler
 class QuantizeHandler(ABC):
     """ Base handler class for the quantizer patterns
@@ -53,7 +61,7 @@ class QuantizeHandler(ABC):
         # determine how many of the first two args are Tensors (versus scalars)
         # this distinguishes things like "x + y" from "x + 2" or "2 + x"
         if isinstance(self.root_node, Node):
-            cache_for_no_tensor_check: Dict[Node, bool] = dict()
+            cache_for_no_tensor_check: Dict[Node, bool] = {}
             for arg_idx in range(len(self.root_node.args)):
                 arg = self.root_node.args[arg_idx]
                 if isinstance(arg, Node) and (
@@ -87,19 +95,6 @@ class QuantizeHandler(ABC):
         """
         return False
 
-    def get_activation_ctr(
-        self,
-        qconfig: Any,
-        pattern: Pattern,
-        is_training: bool,
-    ) -> Optional[Callable]:
-        """
-        Returns the constructor for the activation observer which should be
-        used for the pattern matched to this handler. Some handlers override
-        this to a different value than what is specified in the qconfig.
-        """
-        return qconfig.activation
-
     def is_custom_module(self):
         return self.is_custom_module_
 
@@ -126,19 +121,11 @@ class LinearReLUQuantizeHandler(QuantizeHandler):
 class BatchNormQuantizeHandler(QuantizeHandler):
     pass
 
-@register_quant_pattern(torch.nn.qat.Embedding)
-@register_quant_pattern(torch.nn.qat.EmbeddingBag)
-@register_quant_pattern(torch.nn.Embedding)
-@register_quant_pattern(torch.nn.EmbeddingBag)
+# TODO: remove this class
 class EmbeddingQuantizeHandler(QuantizeHandler):
-    def input_output_observed(self) -> bool:
-        return False
+    pass
 
-# TODO (maybe): merge with embedding quantize handler
-@register_quant_pattern(torch.nn.GRUCell)
-@register_quant_pattern(torch.nn.LSTMCell)
-@register_quant_pattern(torch.nn.RNNCell)
-@register_quant_pattern(torch.nn.LSTM)
+# TODO: remove this class
 class RNNDynamicQuantizeHandler(QuantizeHandler):
     pass
 

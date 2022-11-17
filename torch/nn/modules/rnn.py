@@ -11,15 +11,20 @@ from ..utils.rnn import PackedSequence
 from .. import init
 from ... import _VF
 
+__all__ = ['RNNBase', 'RNN', 'LSTM', 'GRU', 'RNNCellBase', 'RNNCell', 'LSTMCell', 'GRUCell']
+
 _rnn_impls = {
     'RNN_TANH': _VF.rnn_tanh,
     'RNN_RELU': _VF.rnn_relu,
 }
 
 
-def apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Tensor:
+def _apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Tensor:
     return tensor.index_select(dim, permutation)
 
+def apply_permutation(tensor: Tensor, permutation: Tensor, dim: int = 1) -> Tensor:
+    warnings.warn("apply_permutation is deprecated, please use tensor.index_select(dim, permutation) instead")
+    return _apply_permutation(tensor, permutation, dim)
 
 class RNNBase(Module):
     __constants__ = ['mode', 'input_size', 'hidden_size', 'num_layers', 'bias',
@@ -234,7 +239,7 @@ class RNNBase(Module):
     def permute_hidden(self, hx: Tensor, permutation: Optional[Tensor]):
         if permutation is None:
             return hx
-        return apply_permutation(hx, permutation)
+        return _apply_permutation(hx, permutation)
 
 
     def extra_repr(self) -> str:
@@ -313,7 +318,7 @@ class RNN(RNNBase):
     function:
 
     .. math::
-        h_t = \tanh(W_{ih} x_t + b_{ih} + W_{hh} h_{(t-1)} + b_{hh})
+        h_t = \tanh(x_t W_{ih}^T + b_{ih} + h_{t-1}W_{hh}^T + b_{hh})
 
     where :math:`h_t` is the hidden state at time `t`, :math:`x_t` is
     the input at time `t`, and :math:`h_{(t-1)}` is the hidden state of the
@@ -436,6 +441,7 @@ class RNN(RNNBase):
             max_batch_size = int(batch_sizes[0])
         else:
             batch_sizes = None
+            assert (input.dim() in (2, 3)), f"RNN: Expected input to be 2-D or 3-D but received {input.dim()}-D tensor"
             is_batched = input.dim() == 3
             batch_dim = 0 if self.batch_first else 1
             if not is_batched:
@@ -702,7 +708,7 @@ class LSTM(RNNBase):
                        ) -> Tuple[Tensor, Tensor]:
         if permutation is None:
             return hx
-        return apply_permutation(hx[0], permutation), apply_permutation(hx[1], permutation)
+        return _apply_permutation(hx[0], permutation), _apply_permutation(hx[1], permutation)
 
     # Same as above, see torch/nn/modules/module.py::_forward_unimplemented
     @overload  # type: ignore[override]
@@ -728,6 +734,7 @@ class LSTM(RNNBase):
             max_batch_size = int(max_batch_size)
         else:
             batch_sizes = None
+            assert (input.dim() in (2, 3)), f"LSTM: Expected input to be 2-D or 3-D but received {input.dim()}-D tensor"
             is_batched = input.dim() == 3
             batch_dim = 0 if self.batch_first else 1
             if not is_batched:
@@ -851,7 +858,7 @@ class GRU(RNNBase):
             \end{aligned}
 
     Outputs: output, h_n
-        * **output**: tensor of shape :math:`(L, H_{in})` for unbatched input,
+        * **output**: tensor of shape :math:`(L, D * H_{out})` for unbatched input,
           :math:`(L, N, D * H_{out})` when ``batch_first=False`` or
           :math:`(N, L, D * H_{out})` when ``batch_first=True`` containing the output features
           `(h_t)` from the last layer of the GRU, for each `t`. If a
@@ -918,6 +925,7 @@ class GRU(RNNBase):
             max_batch_size = int(max_batch_size)
         else:
             batch_sizes = None
+            assert (input.dim() in (2, 3)), f"GRU: Expected input to be 2-D or 3-D but received {input.dim()}-D tensor"
             is_batched = input.dim() == 3
             batch_dim = 0 if self.batch_first else 1
             if not is_batched:
@@ -1061,8 +1069,8 @@ class RNNCell(RNNCellBase):
         >>> hx = torch.randn(3, 20)
         >>> output = []
         >>> for i in range(6):
-                hx = rnn(input[i], hx)
-                output.append(hx)
+        ...     hx = rnn(input[i], hx)
+        ...     output.append(hx)
     """
     __constants__ = ['input_size', 'hidden_size', 'bias', 'nonlinearity']
     nonlinearity: str
@@ -1153,6 +1161,8 @@ class LSTMCell(RNNCellBase):
         All the weights and biases are initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`
         where :math:`k = \frac{1}{\text{hidden\_size}}`
 
+    On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
+
     Examples::
 
         >>> rnn = nn.LSTMCell(10, 20) # (input_size, hidden_size)
@@ -1161,8 +1171,8 @@ class LSTMCell(RNNCellBase):
         >>> cx = torch.randn(3, 20)
         >>> output = []
         >>> for i in range(input.size()[0]):
-                hx, cx = rnn(input[i], (hx, cx))
-                output.append(hx)
+        ...     hx, cx = rnn(input[i], (hx, cx))
+        ...     output.append(hx)
         >>> output = torch.stack(output, dim=0)
     """
 
@@ -1244,6 +1254,8 @@ class GRUCell(RNNCellBase):
         All the weights and biases are initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`
         where :math:`k = \frac{1}{\text{hidden\_size}}`
 
+    On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
+
     Examples::
 
         >>> rnn = nn.GRUCell(10, 20)
@@ -1251,8 +1263,8 @@ class GRUCell(RNNCellBase):
         >>> hx = torch.randn(3, 20)
         >>> output = []
         >>> for i in range(6):
-                hx = rnn(input[i], hx)
-                output.append(hx)
+        ...     hx = rnn(input[i], hx)
+        ...     output.append(hx)
     """
 
     def __init__(self, input_size: int, hidden_size: int, bias: bool = True,

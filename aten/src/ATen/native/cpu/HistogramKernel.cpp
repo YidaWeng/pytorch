@@ -148,8 +148,8 @@ void histogramdd_cpu_contiguous(Tensor& hist, const TensorList& bin_edges,
             for (const auto dim : c10::irange(D)) {
                 const input_t elt = accessor_in[i][dim];
 
-                // Skips elements which fall outside the specified bins
-                if (elt < leftmost_edge[dim] || rightmost_edge[dim] < elt) {
+                // Skips elements which fall outside the specified bins and NaN elements
+                if (!(elt >= leftmost_edge[dim] && elt <= rightmost_edge[dim])) {
                     skip_elt = true;
                     break;
                 }
@@ -226,7 +226,7 @@ void histogramdd_out_cpu_template(const Tensor& self, const c10::optional<Tensor
         bin_edges_contig[dim] = bin_edges[dim].contiguous();
     }
 
-    AT_DISPATCH_FLOATING_TYPES(self.scalar_type(), "histogram_cpu", [&]() {
+    AT_DISPATCH_FLOATING_TYPES_AND(kBFloat16, self.scalar_type(), "histogram_cpu", [&]() {
         histogramdd_cpu_contiguous<scalar_t, bin_algorithm>(
                 hist, bin_edges_contig, reshaped_input, reshaped_weight);
     });

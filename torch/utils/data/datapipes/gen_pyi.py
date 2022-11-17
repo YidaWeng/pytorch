@@ -171,13 +171,17 @@ def get_method_definitions(file_path: Union[str, List[str]],
     # 3. Remove first argument after self (unless it is "*datapipes"), default args, and spaces
     """
     if root == "":
-        os.chdir(str(pathlib.Path(__file__).parent.resolve()))
-    else:
-        os.chdir(root)
+        root = str(pathlib.Path(__file__).parent.resolve())
     file_path = [file_path] if isinstance(file_path, str) else file_path
+    file_path = [os.path.join(root, path) for path in file_path]
     file_paths = find_file_paths(file_path,
                                  files_to_exclude=files_to_exclude.union(deprecated_files))
-    methods_and_signatures, methods_and_class_names, methods_w_special_output_types = parse_datapipe_files(file_paths)
+    methods_and_signatures, methods_and_class_names, methods_w_special_output_types = \
+        parse_datapipe_files(file_paths)
+
+    for fn_name in method_to_special_output_type:
+        if fn_name not in methods_w_special_output_types:
+            methods_w_special_output_types.add(fn_name)
 
     method_definitions = []
     for method_name, arguments in methods_and_signatures.items():
@@ -189,6 +193,7 @@ def get_method_definitions(file_path: Union[str, List[str]],
         method_definitions.append(f"# Functional form of '{class_name}'\n"
                                   f"def {method_name}({arguments}) -> {output_type}: ...")
     method_definitions.sort(key=lambda s: s.split('\n')[1])  # sorting based on method_name
+
     return method_definitions
 
 
@@ -201,7 +206,7 @@ iterDP_method_to_special_output_type: Dict[str, str] = {"demux": "List[IterDataP
 mapDP_file_path: str = "map"
 mapDP_files_to_exclude: Set[str] = {"__init__.py", "utils.py"}
 mapDP_deprecated_files: Set[str] = set()
-mapDP_method_to_special_output_type: Dict[str, str] = {}
+mapDP_method_to_special_output_type: Dict[str, str] = {"shuffle": "IterDataPipe"}
 
 
 def main() -> None:
@@ -226,5 +231,4 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    print("Generating Python interface file 'datapipe.pyi'...")
     main()

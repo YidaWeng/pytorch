@@ -1,8 +1,10 @@
 # Copyright 2022 Cruise LLC
+import logging
 import warnings
 from collections import OrderedDict
-import logging
+from typing import Union, Iterable, Dict
 
+import torch
 import torch.distributed as dist
 import torch.distributed.algorithms.model_averaging.averagers as averagers
 import torch.distributed.algorithms.model_averaging.utils as utils
@@ -45,43 +47,44 @@ class HierarchicalModelAverager(averagers.ModelAverager):
                                                 (default: ``None``)
 
     Example::
-        >>>  from collections import OrderedDict
-        >>>  import torch
-        >>>  import torch.distributed as dist
-        >>>  from torch.distributed.algorithms.ddp_comm_hooks.post_localSGD_hook import (
-        >>>      PostLocalSGDState,
-        >>>      post_localSGD_hook,
-        >>>  )
-        >>>  import torch.distributed.algorithms.model_averaging.hierarchical_model_averager as hierarchicalSGD
-        >>>  import torch.nn as nn
+        >>> # xdoctest: +SKIP('undefined rank')
+        >>> from collections import OrderedDict
+        >>> import torch
+        >>> import torch.distributed as dist
+        >>> from torch.distributed.algorithms.ddp_comm_hooks.post_localSGD_hook import (
+        >>>     PostLocalSGDState,
+        >>>     post_localSGD_hook,
+        >>> )
+        >>> import torch.distributed.algorithms.model_averaging.hierarchical_model_averager as hierarchicalSGD
+        >>> import torch.nn as nn
         >>>
-        >>>  dist.init_process_group("nccl", rank=rank, world_size=16)
-        >>>  torch.cuda.set_device(rank)
-        >>>  module = nn.Linear(1, 1, bias=False).to(rank)
-        >>>  model = nn.parallel.DistributedDataParallel(
-        >>>     module, device_ids=[rank], output_device=rank
-        >>>  )
-        >>>  # Register a post-localSGD communication hook.
-        >>>  # Assume that each machine has 4 GPUs, then each intra-machine subgroup has a size of 4.
-        >>>  subgroup, _ = dist.new_subgroups()
-        >>>  state = PostLocalSGDState(subgroup=subgroup, start_localSGD_iter=100)
-        >>>  model.register_comm_hook(state, post_localSGD_hook)
+        >>> dist.init_process_group("nccl", rank=rank, world_size=16)
+        >>> torch.cuda.set_device(rank)
+        >>> module = nn.Linear(1, 1, bias=False).to(rank)
+        >>> model = nn.parallel.DistributedDataParallel(
+        >>>    module, device_ids=[rank], output_device=rank
+        >>> )
+        >>> # Register a post-localSGD communication hook.
+        >>> # Assume that each machine has 4 GPUs, then each intra-machine subgroup has a size of 4.
+        >>> subgroup, _ = dist.new_subgroups()
+        >>> state = PostLocalSGDState(process_group=None, subgroup=subgroup, start_localSGD_iter=100)
+        >>> model.register_comm_hook(state, post_localSGD_hook)
         >>>
-        >>>  # Average parameters among each group of 8 processes every 4 iterations, and among all
-        >>>  # the 16 processes every 16 iterations.
-        >>>  averager = hierarchicalSGD.HierarchicalModelAverager(
-        >>>      period_group_size_dict=OrderedDict([(4, 8), (16, 16)]), warmup_steps=100)
-        >>>  # Note that ``warmup_steps`` must be the same as ``start_localSGD_iter`` used in ``PostLocalSGDState``.
-        >>>  # In the first 100 steps, run global gradient averaging like normal DDP at every step.
-        >>>  # After 100 steps, run model averaging at two levels.
-        >>>  for step in range(0, 200):
-        >>>     optimizer.zero_grad()
-        >>>     loss = loss_fn(output, labels)
-        >>>     loss.backward()
-        >>>     optimizer.step()
-        >>>     # Average parameters after ``optimizer.step()``.
-        >>>     # Thus, the inter-node communication only occurs periodically after ``warmup_steps``.
-        >>>     averager.average_parameters(model.parameters())
+        >>> # Average parameters among each group of 8 processes every 4 iterations, and among all
+        >>> # the 16 processes every 16 iterations.
+        >>> averager = hierarchicalSGD.HierarchicalModelAverager(
+        >>>     period_group_size_dict=OrderedDict([(4, 8), (16, 16)]), warmup_steps=100)
+        >>> # Note that ``warmup_steps`` must be the same as ``start_localSGD_iter`` used in ``PostLocalSGDState``.
+        >>> # In the first 100 steps, run global gradient averaging like normal DDP at every step.
+        >>> # After 100 steps, run model averaging at two levels.
+        >>> for step in range(0, 200):
+        >>>    optimizer.zero_grad()
+        >>>    loss = loss_fn(output, labels)
+        >>>    loss.backward()
+        >>>    optimizer.step()
+        >>>    # Average parameters after ``optimizer.step()``.
+        >>>    # Thus, the inter-node communication only occurs periodically after ``warmup_steps``.
+        >>>    averager.average_parameters(model.parameters())
 
     .. warning ::
         The last group size in the dict must be the size of the provided ``process_group``,
@@ -110,8 +113,9 @@ class HierarchicalModelAverager(averagers.ModelAverager):
         overall_group_size = dist.get_world_size(group=self.process_group)
         if list(period_group_size_dict.values())[-1] != overall_group_size:
             raise ValueError(
-                "The last value in arg ``period_process_group_dict`` "
-                "must be equal to the size of arg ``process_group``.")
+                f"The last value in arg ``period_process_group_dict`` {list(period_group_size_dict.values())[-1]} "
+                f"must be equal to the size of arg ``process_group`` {overall_group_size}."
+            )
 
         self.period_process_group_dict = OrderedDict()
         logger.info("Model averaging hierarchy:")
@@ -143,16 +147,18 @@ class HierarchicalModelAverager(averagers.ModelAverager):
                 return self.period_process_group_dict[period]
         return None
 
-    def average_parameters(self, params):
-        r"""
-        Averages parameters if ``step`` is no less than ``warmup_steps``
+    def average_parameters(self, params: Union[Iterable[torch.nn.Parameter], Iterable[Dict[str, torch.nn.Parameter]]]):
+        """
+        Averages parameters or parameter groups of an optimizer if ``step`` is no less than ``warmup_steps``
         and it can be divided by a period in the keys of ``period_process_group_dict``,
         where ``step`` is increased by 1 at each iteration in the training loop.
         If ``step`` can be divided by multiple periods in the keys of ``period_process_group_dict``,
         only the largest period is used, and the corresponding process group is used for averaging parameters.
+        Args:
+            params: The parameters of a model or parameter groups of an optimizer.
         """
         if self.step >= self.warmup_steps:
             group = self._find_process_group()
             if group is not None:
-                utils.average_parameters(iter(params), group)
+                utils.average_parameters_or_parameter_groups(params, group)
         self.step += 1

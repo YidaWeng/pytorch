@@ -1,13 +1,30 @@
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/TensorTransformations.h>
 #include <ATen/native/IndexKernel.h>  // for flip_stub
 
-#include <ATen/Functions.h>
-#include <ATen/NativeFunctions.h>
 #include <ATen/Parallel.h>
+#include <ATen/TensorIterator.h>
 #include <ATen/WrapDimUtilsMulti.h>
 #include <ATen/core/DimVector.h>
 #include <c10/util/Exception.h>
 #include <c10/util/irange.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/atleast_1d_native.h>
+#include <ATen/ops/atleast_2d_native.h>
+#include <ATen/ops/atleast_3d_native.h>
+#include <ATen/ops/cat.h>
+#include <ATen/ops/empty_like.h>
+#include <ATen/ops/flip_native.h>
+#include <ATen/ops/fliplr_native.h>
+#include <ATen/ops/flipud_native.h>
+#include <ATen/ops/roll_native.h>
+#include <ATen/ops/rot90_native.h>
+#include <ATen/ops/zeros_like_ops.h>
+#endif
 
 #include <algorithm>
 #include <vector>
@@ -210,6 +227,10 @@ std::vector<Tensor> atleast_3d(TensorList tensors) {
   };
   std::transform(tensors.cbegin(), tensors.cend(), result.begin(), transform_lambda);
   return result;
+}
+
+Tensor chalf(const Tensor& self, c10::optional<MemoryFormat> memory_format) {
+  return self.to(kComplexHalf, false, false, memory_format);
 }
 
 DEFINE_DISPATCH(flip_stub);

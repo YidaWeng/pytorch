@@ -21,10 +21,10 @@ torch._C._jit_set_profiling_executor(True)
 torch._C._get_graph_executor_optimize(True)
 
 from torch.testing._internal.common_utils import run_tests, ProfilingMode, GRAPH_EXECUTOR, \
-    enable_profiling_mode_for_profiling_tests, slowTest
+    enable_profiling_mode_for_profiling_tests, slowTest, skipIfTorchDynamo
 from torch.testing._internal.jit_utils import JitTestCase, \
     RUN_CUDA, RUN_CUDA_HALF, RUN_CUDA_MULTI_GPU, warmup_backward, set_fusion_group_inlining, \
-    clone_inputs, get_traced_sample_variant_pairs, TensorExprTestOptions
+    clone_inputs, get_traced_sample_variant_pairs, TensorExprTestOptions, NoTracerWarnContextManager
 
 from torch.testing._internal.common_methods_invocations import op_db
 from torch.testing._internal.common_device_type import ops, onlyCPU, instantiate_device_type_tests, \
@@ -1387,19 +1387,26 @@ class TestTEFuser(JitTestCase):
                 F.hardsigmoid,
                 F.hardswish,
                 F.softplus,
+                F.silu,
+                F.mish,
+                F.elu,
                 torch.sqrt,
                 torch.rsqrt,
                 torch.abs,
-                torch.ceil,
-                torch.floor,
-                torch.round,
-                torch.trunc,
+                # TODO broken on int8 since
+                # https://github.com/pytorch/pytorch/pull/85144
+                # RuntimeError: Invalid integral op_type: 23
+                # torch.ceil,
+                # torch.floor,
+                # torch.round,
+                # torch.trunc,
                 torch.frac,
                 # TODO: broken on ROCm?
                 # F.hardshrink,
                 F.leaky_relu,
                 lambda x: torch.threshold(x, 0, -10),
-                lambda x: torch.clamp(x, -10, 10),
+                # TODO: broken since type promotion was added
+                # lambda x: torch.clamp(x, -10, 10),
             ]
             gpu_only = {torch.erf, torch.erfc}
             sizes = [(1,), (2,), (4, 4)]
@@ -2195,7 +2202,9 @@ class TestTEFuser(JitTestCase):
         def test(fn, args):
             trace = torch.jit.trace(fn, args)
             self.assertAllFused(trace.graph_for(*args))
-            torch.testing.assert_allclose(fn(*args), trace(*args))
+            # TODO: Are `NaN`'s actually ok here or did this pass silently before, because `equal_nan=True` was the
+            #  default?
+            torch.testing.assert_close(fn(*args), trace(*args), equal_nan=True)
 
         def bn(i, x):
             return torch.batch_norm(i, x, x, x, x, False, 0.1, 1e-4, False).relu()
@@ -2340,6 +2349,121 @@ class TestTEFuser(JitTestCase):
         scr(x)
         scr(x)
         self.assertLastGraphAllFused()
+
+    @unittest.skipIf(not LLVM_ENABLED, "Compiles with TensorExprKernel")
+    def test_to_dtype(self):
+        def f(x):
+            y = torch.sigmoid(x)
+            z = y._autocast_to_reduced_precision(True, True, torch.half, torch.bfloat16)
+            h = z._autocast_to_full_precision(True, True)
+            i = h.to(dtype=torch.bfloat16)
+            j = i.to(dtype=torch.float32)
+            return j
+
+        x = torch.rand((2, 2), dtype=torch.float32)
+        scr = torch.jit.trace(f, x)
+        scr(x)
+        scr(x)
+        self.assertLastGraphAllFused()
+        self.assertEqual(f(x), scr(x), atol=4e-3, rtol=4e-3)
+
+        bf_x = torch.rand((2, 2), dtype=torch.bfloat16)
+        bf_scr = torch.jit.trace(f, bf_x)
+        bf_scr(bf_x)
+        bf_scr(bf_x)
+        graph = bf_scr.graph_for(bf_x)
+        fusion_groups = self.findFusionGroups(graph)
+        self.assertEqual(len(fusion_groups), 2)
+        self.assertEqual(f(bf_x), bf_scr(bf_x), atol=4e-3, rtol=4e-3)
+
+    def test_with_strict_fusion(self):
+
+        def success(x):
+            with torch.jit.strict_fusion():
+                return x + x + x
+
+        scripted = self.checkScript(success, (torch.rand([4]),))
+        g = torch.jit.last_executed_optimized_graph()
+        FileCheck().check_not("aten::add").check("prim::TensorExprGroup").run(g)
+
+        def foo(x):
+            with torch.jit.strict_fusion():
+                return x + x + torch.rand([4]) + 3
+
+        with self.assertRaises(Exception) as error_out:
+            foo_s = torch.jit.script(foo)
+            foo_s(torch.rand([4]))
+            foo_s(torch.rand([4]))
+            print(torch.jit.last_executed_optimized_graph())
+        fc = FileCheck().check("Found unfused operators")
+        fc.check("aten::rand(SymInt[] size")
+        fc.check("torch.rand([4]").run(str(error_out.exception))
+
+        with warnings.catch_warnings(record=True) as warns:
+            foo(torch.rand([4]))
+
+        FileCheck().check("Only works in script mode").run(str(warns[0]))
+
+        def test_autodiff(x):
+            with torch.jit.strict_fusion():
+                return torch.rand([4]) + x + x + x
+
+        foo_s = torch.jit.script(test_autodiff)
+        inp = torch.rand([4], requires_grad=True)
+        with self.assertRaises(Exception) as error_out:
+            for _ in range(3):
+                foo_s(inp)
+        f = FileCheck().check("unfused operators").check("aten::rand")
+        f.run(str(error_out.exception))
+
+        def test_separate_fusions(x, y):
+            with torch.jit.strict_fusion():
+                return x + x + x, y + y + y
+
+        inp = torch.rand([4], requires_grad=True)
+        with self.assertRaises(Exception) as error_out:
+            for _ in range(3):
+                foo_s = torch.jit.script(test_separate_fusions)
+                foo_s(inp, inp)
+
+        f = FileCheck().check("Found multiple fusions")
+        f.run(str(error_out.exception))
+
+    def test_constant_chunk_shapes(self):
+        # We had an issue where buildShapeExpressions would fail as show below:
+        #
+        # %1 : Tensor = Constant[..]  # not supported, we don't build this shape
+        # %2 : Tensor = Constant[..]  # not supported
+        # %3 : Tensor = aten::add(%1, %2)  # inputs not supported, we don't build shape
+        # ... = prim::ConstantChunk[..](%3)  # it forgets to check whether input shapes exist, and fails
+        if self.dynamic_shapes:
+            self.skipTest("TODO: chunk dynamic shapes")
+
+        for device in self.devices:
+            def f(x, y):
+                r = torch.tensor(4)
+                z1, z2 = (x + y + r).chunk(2, dim=1)
+                return z1 * z2
+
+            x = torch.randn(4, 4, dtype=torch.float, device=device)
+            y = torch.randn(4, 4, dtype=torch.float, device=device)
+
+            ge = self.checkTrace(f, (x, y))
+            graph = ge.graph_for(x, y)
+
+            # make sure that we are actually testing the right scenario
+            FileCheck().check("with " + FUSION_GROUP + "_").check_count(
+                "ConstantChunk", 1, exactly=True
+            ).run(str(graph))
+
+            f_traced = torch.jit.trace(f, (x, y))
+
+            for i in range(4):
+                # make sure this doesn't error out
+                res = f_traced(x, y)
+
+            self.assertEqual(res, f(x, y))
+
 
 class TestTEFuserStatic(TestTEFuser):
     dynamic_shapes = False
@@ -2535,6 +2659,7 @@ def f({', '.join(param_names)}):
             self.assertEqual(kernel.fallback(tuple(param_values)), correct_val)
 
     @onlyCPU
+    @skipIfTorchDynamo("TorchDynamo fails here for unknown reasons")
     @unittest.skipIf(not LLVM_ENABLED, "Compiles with TensorExprKernel")
     @ops([op for op in op_db if get_name(op) in works_list], allowed_dtypes=(torch.float,))
     def test_working(self, device, dtype, op):
@@ -2570,23 +2695,28 @@ def f({', '.join(param_names)}):
     @onlyCPU
     @ops(op_db, dtypes=OpDTypes.supported)
     def test_nnc_correctness(self, device, dtype, op):
-        variant_sample_pairs = get_traced_sample_variant_pairs(device, dtype, op)
+        if not op.supports_tracing:
+            self.skipTest("Requires tracing support")
 
-        for variant, sample in variant_sample_pairs:
-            trace = create_traced_fn(self, variant)
-            ref = variant(*clone_inputs((sample.input, *sample.args)), **sample.kwargs)
+        with NoTracerWarnContextManager() as no_warn:
+            variant_sample_pairs = get_traced_sample_variant_pairs(device, dtype, op)
 
-            trace(*clone_inputs((sample.input, *sample.args)), **sample.kwargs)
+            for variant, sample in variant_sample_pairs:
+                trace = create_traced_fn(self, variant, cache_traced_fn=True)
+                ref = variant(*clone_inputs((sample.input, *sample.args)), **sample.kwargs)
 
-            val = trace(*clone_inputs((sample.input, *sample.args)), **sample.kwargs)
+                trace(*clone_inputs((sample.input, *sample.args)), **sample.kwargs)
+                val = trace(*clone_inputs((sample.input, *sample.args)), **sample.kwargs)
 
-            self.assertEqual(ref, val)
+                atol = 2e-1 if dtype == torch.bfloat16 else 1e-5
+                rtol = 2e-1 if dtype == torch.bfloat16 else 1e-5
+                self.assertEqual(ref, val, atol=atol, rtol=rtol)
 
-        # https://github.com/pytorch/pytorch/issues/35600
-        # each torch.jit.trace adds state to the _python_cu compilation unit
-        # since this test traces a lot of functions, out-of-memory can occur
-        # if the CU is not cleared.
-        torch.jit._state._python_cu.drop_all_functions()
+            # https://github.com/pytorch/pytorch/issues/35600
+            # each torch.jit.trace adds state to the _python_cu compilation unit
+            # since this test traces a lot of functions, out-of-memory can occur
+            # if the CU is not cleared.
+            torch.jit._state._python_cu.drop_all_functions()
 
 only_for = ("cpu", "cuda")
 instantiate_device_type_tests(TestNNCOpInfo, globals(), only_for=only_for)

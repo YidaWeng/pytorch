@@ -1,10 +1,20 @@
-#include <ATen/ATen.h>
-#include <ATen/NativeFunctions.h>
+#define TORCH_ASSERT_ONLY_METHOD_OPERATORS
+#include <ATen/core/Tensor.h>
+#include <ATen/Dispatch.h>
 #include <ATen/Parallel.h>
+#include <ATen/TensorMeta.h>
 
 #include <c10/util/irange.h>
 
-#include <tuple>
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#else
+#include <ATen/ops/empty.h>
+#include <ATen/ops/fractional_max_pool3d_backward_native.h>
+#include <ATen/ops/fractional_max_pool3d_native.h>
+#endif
+
 #include <vector>
 
 namespace at {
@@ -71,13 +81,13 @@ TORCH_PRECOMPUTE_META_FUNC(fractional_max_pool3d)(
 
   if (ndims == 4) {
     /* resize output */
-    set_output(0, {numPlanes, outputT, outputH, outputW}, input_.options());
+    set_output_raw_strided(0, {numPlanes, outputT, outputH, outputW}, {}, input_.options());
     /* indices will contain the locations for each output point */
-    set_output(1, {numPlanes, outputT, outputH, outputW}, input_.options().dtype(kLong));
+    set_output_raw_strided(1, {numPlanes, outputT, outputH, outputW}, {}, input_.options().dtype(kLong));
   } else {
-    set_output(0, {numBatch, numPlanes, outputT, outputH, outputW}, input_.options());
+    set_output_raw_strided(0, {numBatch, numPlanes, outputT, outputH, outputW}, {}, input_.options());
     /* indices will contain the locations for each output point */
-    set_output(1, {numBatch, numPlanes, outputT, outputH, outputW}, input_.options().dtype(kLong));
+    set_output_raw_strided(1, {numBatch, numPlanes, outputT, outputH, outputW}, {}, input_.options().dtype(kLong));
   }
 
   return TORCH_PRECOMPUTE_STRUCT(fractional_max_pool3d)().set_numBatch(numBatch).set_numPlanes(numPlanes).set_inputT(inputT).set_inputH(inputH).set_inputW(inputW)
