@@ -11,12 +11,9 @@
 #include <ATen/cuda/NumericLimits.cuh>
 #include <ATen/native/cuda/Reduce.cuh>
 
-#include <ATen/Dispatch.h>
-#include <ATen/NumericUtils.h>
-#include <ATen/cuda/NumericLimits.cuh>
+#include <thrust/pair.h>
 
-namespace at {
-namespace native {
+namespace at::native {
 
 template <typename scalar_t>
 void _min_max_values_kernel_cuda_impl(TensorIterator& iter) {
@@ -47,5 +44,4 @@ void aminmax_launch_kernel(TensorIterator& iter) {
       });
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native

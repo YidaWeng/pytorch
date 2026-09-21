@@ -2,8 +2,8 @@
 
 #include <gtest/gtest.h>
 #include <map>
-#include <memory>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -16,12 +16,13 @@ using c10::weak_intrusive_ptr;
 #pragma GCC diagnostic ignored "-Wpragmas"
 #pragma GCC diagnostic ignored "-Wunknown-warning-option"
 #pragma GCC diagnostic ignored "-Wself-move"
+#pragma GCC diagnostic ignored "-Wfree-nonheap-object"
 #endif
 
 #ifdef __clang__
 #pragma clang diagnostic ignored "-Wself-assign-overloaded"
 #endif
-
+// NOLINTBEGIN(clang-analyzer-cplusplus*)
 namespace {
 class SomeClass0Parameters : public intrusive_ptr_target {};
 class SomeClass1Parameter : public intrusive_ptr_target {
@@ -45,6 +46,7 @@ struct SomeChildClass : SomeBaseClass {
   SomeChildClass(int v) : SomeBaseClass(v) {}
 };
 
+// NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
 class DestructableMock : public intrusive_ptr_target {
  public:
   DestructableMock(bool* resourcesReleased, bool* wasDestructed)
@@ -87,11 +89,11 @@ class NullType2 final {
   }
 };
 SomeClass NullType2::singleton_;
-static_assert(NullType1::singleton() != NullType2::singleton(), "");
+static_assert(NullType1::singleton() != NullType2::singleton());
 } // namespace
 
 static_assert(
-    std::is_same<SomeClass, intrusive_ptr<SomeClass>::element_type>::value,
+    std::is_same_v<SomeClass, intrusive_ptr<SomeClass>::element_type>,
     "intrusive_ptr<T>::element_type is wrong");
 
 TEST(MakeIntrusiveTest, ClassWith0Parameters) {
@@ -143,6 +145,11 @@ TEST(IntrusivePtrTest, givenValidPtr_whenCallingConstGet_thenReturnsObject) {
 
 TEST(IntrusivePtrTest, givenInvalidPtr_whenCallingGet_thenReturnsNullptr) {
   intrusive_ptr<SomeClass1Parameter> obj;
+  EXPECT_EQ(nullptr, obj.get());
+}
+
+TEST(IntrusivePtrTest, givenNullptr_whenCallingGet_thenReturnsNullptr) {
+  intrusive_ptr<SomeClass1Parameter> obj(nullptr);
   EXPECT_EQ(nullptr, obj.get());
 }
 
@@ -1710,7 +1717,7 @@ struct WeakReferenceToSelf : public intrusive_ptr_target {
 } // namespace
 
 static_assert(
-    std::is_same<SomeClass, weak_intrusive_ptr<SomeClass>::element_type>::value,
+    std::is_same_v<SomeClass, weak_intrusive_ptr<SomeClass>::element_type>,
     "weak_intrusive_ptr<T>::element_type is wrong");
 
 TEST(
@@ -1771,7 +1778,7 @@ TEST(
     givenInvalidPtr_whenMoveAssigning_thenNewInstanceIsValid) {
   IntrusiveAndWeak<SomeClass> obj1 = make_weak_intrusive<SomeClass>();
   weak_intrusive_ptr<SomeClass> obj2 = make_invalid_weak<SomeClass>();
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = std::move(obj1.weak);
   EXPECT_FALSE(obj2.expired());
 }
@@ -1817,7 +1824,7 @@ TEST(
     givenWeakOnlyPtr_whenMoveAssigning_thenNewInstanceIsValid) {
   IntrusiveAndWeak<SomeClass> obj1 = make_weak_intrusive<SomeClass>();
   weak_intrusive_ptr<SomeClass> obj2 = make_weak_only<SomeClass>();
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = std::move(obj1.weak);
   EXPECT_FALSE(obj2.expired());
 }
@@ -1836,7 +1843,7 @@ TEST(
     WeakIntrusivePtrTest,
     givenWeakOnlyPtr_whenMoveAssigningToSelf_thenStaysInvalid) {
   weak_intrusive_ptr<SomeClass> obj1 = make_weak_only<SomeClass>();
-  obj1.lock().get();
+  std::ignore = obj1.lock().get();
   obj1 = std::move(obj1);
   // NOLINTNEXTLINE(bugprone-use-after-move)
   EXPECT_TRUE(obj1.expired());
@@ -1900,7 +1907,7 @@ TEST(
   IntrusiveAndWeak<SomeChildClass> obj1 =
       make_weak_intrusive<SomeChildClass>(5);
   weak_intrusive_ptr<SomeBaseClass> obj2 = make_invalid_weak<SomeBaseClass>();
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = std::move(obj1.weak);
   EXPECT_FALSE(obj2.expired());
 }
@@ -1933,7 +1940,7 @@ TEST(
   IntrusiveAndWeak<SomeChildClass> obj1 =
       make_weak_intrusive<SomeChildClass>(5);
   weak_intrusive_ptr<SomeBaseClass> obj2 = make_weak_only<SomeBaseClass>(2);
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = std::move(obj1.weak);
   EXPECT_FALSE(obj2.expired());
 }
@@ -2015,7 +2022,7 @@ TEST(
     givenInvalidPtr_whenCopyAssigning_thenNewInstanceIsValid) {
   IntrusiveAndWeak<SomeClass> obj1 = make_weak_intrusive<SomeClass>();
   weak_intrusive_ptr<SomeClass> obj2 = make_invalid_weak<SomeClass>();
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = obj1.weak;
   EXPECT_FALSE(obj2.expired());
 }
@@ -2034,7 +2041,7 @@ TEST(
     givenWeakOnlyPtr_whenCopyAssigning_thenNewInstanceIsValid) {
   IntrusiveAndWeak<SomeClass> obj1 = make_weak_intrusive<SomeClass>();
   weak_intrusive_ptr<SomeClass> obj2 = make_weak_only<SomeClass>();
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = obj1.weak;
   EXPECT_FALSE(obj2.expired());
 }
@@ -2053,7 +2060,7 @@ TEST(
     WeakIntrusivePtrTest,
     givenWeakOnlyPtr_whenCopyAssigningToSelf_thenStaysInvalid) {
   weak_intrusive_ptr<SomeClass> obj1 = make_weak_only<SomeClass>();
-  obj1.lock().get();
+  std::ignore = obj1.lock().get();
   // NOLINTNEXTLINE(clang-diagnostic-self-assign-overloaded)
   obj1 = obj1;
   EXPECT_TRUE(obj1.expired());
@@ -2095,7 +2102,7 @@ TEST(
   IntrusiveAndWeak<SomeChildClass> obj1 =
       make_weak_intrusive<SomeChildClass>(5);
   weak_intrusive_ptr<SomeBaseClass> obj2 = make_invalid_weak<SomeBaseClass>();
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = obj1.weak;
   EXPECT_FALSE(obj2.expired());
 }
@@ -2128,7 +2135,7 @@ TEST(
   IntrusiveAndWeak<SomeChildClass> obj1 =
       make_weak_intrusive<SomeChildClass>(5);
   weak_intrusive_ptr<SomeBaseClass> obj2 = make_weak_only<SomeBaseClass>(2);
-  obj1.weak.lock().get();
+  std::ignore = obj1.weak.lock().get();
   obj2 = obj1.weak;
   EXPECT_FALSE(obj2.expired());
 }
@@ -3538,3 +3545,4 @@ TEST(
   p->ptr = weak_intrusive_ptr<intrusive_ptr_target>(
       intrusive_ptr<intrusive_ptr_target>(p));
 }
+// NOLINTEND(clang-analyzer-cplusplus*)

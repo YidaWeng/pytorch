@@ -1,14 +1,22 @@
 import argparse
 import gzip
 import os
+import socket
 import sys
-from urllib.error import URLError
+import time
+from http.client import HTTPException
 from urllib.request import urlretrieve
 
+
 MIRRORS = [
-    "http://yann.lecun.com/exdb/mnist/",
-    "https://ossci-datasets.s3.amazonaws.com/mnist/",
+    "https://ossci-datasets.s3.amazonaws.com/mnist/",  # @lint-ignore
 ]
+
+# Number of attempts per mirror before giving up on it. The download hits a
+# single S3 mirror with no built-in retry, so a transient network blip fails
+# the whole job; retry a few times with backoff first.
+RETRIES = 3
+RETRY_BACKOFF_S = 5
 
 RESOURCES = [
     "train-images-idx3-ubyte.gz",
@@ -26,43 +34,48 @@ def report_download_progress(
     if file_size != -1:
         percent = min(1, (chunk_number * chunk_size) / file_size)
         bar = "#" * int(64 * percent)
-        sys.stdout.write("\r0% |{:<64}| {}%".format(bar, int(percent * 100)))
+        sys.stdout.write(f"\r0% |{bar:<64}| {int(percent * 100)}%")
 
 
 def download(destination_path: str, resource: str, quiet: bool) -> None:
     if os.path.exists(destination_path):
         if not quiet:
-            print("{} already exists, skipping ...".format(destination_path))
+            print(f"{destination_path} already exists, skipping ...")
     else:
         for mirror in MIRRORS:
             url = mirror + resource
-            print("Downloading {} ...".format(url))
-            try:
-                hook = None if quiet else report_download_progress
-                urlretrieve(url, destination_path, reporthook=hook)
-            except (URLError, ConnectionError) as e:
-                print("Failed to download (trying next):\n{}".format(e))
-                continue
-            finally:
-                if not quiet:
-                    # Just a newline.
-                    print()
-            break
-        else:
-            raise RuntimeError("Error downloading resource!")
+            for attempt in range(1, RETRIES + 1):
+                print(f"Downloading {url} ...")
+                try:
+                    hook = None if quiet else report_download_progress
+                    urlretrieve(url, destination_path, reporthook=hook)
+                    return
+                except (OSError, HTTPException) as e:
+                    # A failed urlretrieve leaves a partial file behind; remove
+                    # it so the exists check above doesn't skip it on a rerun.
+                    if os.path.exists(destination_path):
+                        os.remove(destination_path)
+                    print(f"Failed to download (attempt {attempt}/{RETRIES}):\n{e}")
+                    if attempt < RETRIES:
+                        time.sleep(RETRY_BACKOFF_S * attempt)
+                finally:
+                    if not quiet:
+                        # Just a newline.
+                        print()
+        raise RuntimeError("Error downloading resource!")
 
 
 def unzip(zipped_path: str, quiet: bool) -> None:
     unzipped_path = os.path.splitext(zipped_path)[0]
     if os.path.exists(unzipped_path):
         if not quiet:
-            print("{} already exists, skipping ... ".format(unzipped_path))
+            print(f"{unzipped_path} already exists, skipping ... ")
         return
     with gzip.open(zipped_path, "rb") as zipped_file:
         with open(unzipped_path, "wb") as unzipped_file:
             unzipped_file.write(zipped_file.read())
             if not quiet:
-                print("Unzipped {} ...".format(zipped_path))
+                print(f"Unzipped {zipped_path} ...")
 
 
 def main() -> None:
@@ -76,6 +89,10 @@ def main() -> None:
         "-q", "--quiet", action="store_true", help="Don't report about progress"
     )
     options = parser.parse_args()
+
+    # urlretrieve has no timeout parameter and defaults to blocking forever on
+    # a stalled connection, which would defeat the retry logic in download().
+    socket.setdefaulttimeout(60)
 
     if not os.path.exists(options.destination):
         os.makedirs(options.destination)

@@ -1,14 +1,19 @@
-from .module import Module
+# mypy: allow-untyped-defs
 
-from typing import Tuple, Union
 from torch import Tensor
 from torch.types import _size
 
-__all__ = ['Flatten', 'Unflatten']
+from .module import Module
+
+
+__all__ = ["Flatten", "Unflatten"]
+
 
 class Flatten(Module):
     r"""
-    Flattens a contiguous range of dims into a tensor. For use with :class:`~nn.Sequential`.
+    Flattens a contiguous range of dims into a tensor.
+
+    For use with :class:`~nn.Sequential`, see :meth:`torch.flatten` for details.
 
     Shape:
         - Input: :math:`(*, S_{\text{start}},..., S_{i}, ..., S_{\text{end}}, *)`,'
@@ -33,34 +38,37 @@ class Flatten(Module):
         >>> output.size()
         torch.Size([160, 5])
     """
-    __constants__ = ['start_dim', 'end_dim']
+
+    __constants__ = ["start_dim", "end_dim"]
     start_dim: int
     end_dim: int
 
     def __init__(self, start_dim: int = 1, end_dim: int = -1) -> None:
-        super(Flatten, self).__init__()
+        super().__init__()
         self.start_dim = start_dim
         self.end_dim = end_dim
 
     def forward(self, input: Tensor) -> Tensor:
+        """
+        Runs the forward pass.
+        """
         return input.flatten(self.start_dim, self.end_dim)
 
     def extra_repr(self) -> str:
-        return 'start_dim={}, end_dim={}'.format(
-            self.start_dim, self.end_dim
-        )
+        """
+        Returns the extra representation of the module.
+        """
+        return f"start_dim={self.start_dim}, end_dim={self.end_dim}"
 
 
 class Unflatten(Module):
     r"""
     Unflattens a tensor dim expanding it to a desired shape. For use with :class:`~nn.Sequential`.
 
-    * :attr:`dim` specifies the dimension of the input tensor to be unflattened, and it can
-      be either `int` or `str` when `Tensor` or `NamedTensor` is used, respectively.
+    * :attr:`dim` specifies the dimension of the input tensor to be unflattened.
 
     * :attr:`unflattened_size` is the new shape of the unflattened dimension of the tensor and it can be
-      a `tuple` of ints or a `list` of ints or `torch.Size` for `Tensor` input;  a `NamedShape`
-      (tuple of `(name, size)` tuples) for `NamedTensor` input.
+      a `tuple` of ints or a `list` of ints or `torch.Size` for `Tensor` input.
 
     Shape:
         - Input: :math:`(*, S_{\text{dim}}, *)`, where :math:`S_{\text{dim}}` is the size at
@@ -69,8 +77,8 @@ class Unflatten(Module):
           :math:`\prod_{i=1}^n U_i = S_{\text{dim}}`.
 
     Args:
-        dim (Union[int, str]): Dimension to be unflattened
-        unflattened_size (Union[torch.Size, Tuple, List, NamedShape]): New shape of the unflattened dimension
+        dim (int): Dimension to be unflattened
+        unflattened_size (Union[torch.Size, Tuple, List]): New shape of the unflattened dimension
 
     Examples:
         >>> input = torch.randn(2, 50)
@@ -90,53 +98,39 @@ class Unflatten(Module):
         >>> output = m(input)
         >>> output.size()
         torch.Size([2, 2, 5, 5])
-        >>> # With namedshape (tuple of tuples)
-        >>> input = torch.randn(2, 50, names=('N', 'features'))
-        >>> unflatten = nn.Unflatten('features', (('C', 2), ('H', 5), ('W', 5)))
-        >>> output = unflatten(input)
-        >>> output.size()
-        torch.Size([2, 2, 5, 5])
     """
-    NamedShape = Tuple[Tuple[str, int]]
 
-    __constants__ = ['dim', 'unflattened_size']
-    dim: Union[int, str]
-    unflattened_size: Union[_size, NamedShape]
+    __constants__ = ["dim", "unflattened_size"]
+    dim: int
+    unflattened_size: _size
 
-    def __init__(self, dim: Union[int, str], unflattened_size: Union[_size, NamedShape]) -> None:
-        super(Unflatten, self).__init__()
-
-        if isinstance(dim, int):
-            self._require_tuple_int(unflattened_size)
-        elif isinstance(dim, str):
-            self._require_tuple_tuple(unflattened_size)
-        else:
-            raise TypeError("invalid argument type for dim parameter")
-
+    def __init__(self, dim: int, unflattened_size: _size) -> None:
+        super().__init__()
+        self._require_tuple_int(unflattened_size)
         self.dim = dim
         self.unflattened_size = unflattened_size
 
-    def _require_tuple_tuple(self, input):
-        if (isinstance(input, tuple)):
-            for idx, elem in enumerate(input):
-                if not isinstance(elem, tuple):
-                    raise TypeError("unflattened_size must be tuple of tuples, " +
-                                    "but found element of type {} at pos {}".format(type(elem).__name__, idx))
-            return
-        raise TypeError("unflattened_size must be a tuple of tuples, " +
-                        "but found type {}".format(type(input).__name__))
-
-    def _require_tuple_int(self, input):
-        if (isinstance(input, (tuple, list))):
+    def _require_tuple_int(self, input) -> None:
+        if isinstance(input, (tuple, list)):
             for idx, elem in enumerate(input):
                 if not isinstance(elem, int):
-                    raise TypeError("unflattened_size must be tuple of ints, " +
-                                    "but found element of type {} at pos {}".format(type(elem).__name__, idx))
+                    raise TypeError(
+                        "unflattened_size must be tuple of ints, "
+                        + f"but found element of type {type(elem).__name__} at pos {idx}"
+                    )
             return
-        raise TypeError("unflattened_size must be a tuple of ints, but found type {}".format(type(input).__name__))
+        raise TypeError(
+            f"unflattened_size must be a tuple of ints, but found type {type(input).__name__}"
+        )
 
     def forward(self, input: Tensor) -> Tensor:
+        """
+        Runs the forward pass.
+        """
         return input.unflatten(self.dim, self.unflattened_size)
 
     def extra_repr(self) -> str:
-        return 'dim={}, unflattened_size={}'.format(self.dim, self.unflattened_size)
+        """
+        Returns the extra representation of the module.
+        """
+        return f"dim={self.dim}, unflattened_size={self.unflattened_size}"

@@ -17,9 +17,8 @@
 #include <ATen/ops/sigmoid.h>
 #endif
 
-namespace at {
+namespace at::meta {
 
-namespace meta {
 TORCH_META_FUNC(glu) (
     const Tensor& self, int64_t dim
 ) {
@@ -35,11 +34,14 @@ TORCH_META_FUNC(glu) (
   const int64_t selfSize = nIn / 2;
   Tensor firstHalf = self.narrow(wrap_dim, 0, selfSize);
   Tensor secondHalf = self.narrow(wrap_dim, selfSize, selfSize);
-  build_borrowing_binary_op(maybe_get_output(), firstHalf, secondHalf);
+  // Do not use build_borrowing_binary_op here, as self halves are stack allocated,
+  // but a structured op's iterator is reused in impl() after meta() func scope ends.
+  // Borrowing them would leave the iterator with dangling operands.
+  build_binary_op(maybe_get_output(), firstHalf, secondHalf);
 }
-} // namespace meta
+} // namespace at::meta
 
-namespace native {
+namespace at::native {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 DEFINE_DISPATCH(glu_stub);
@@ -72,9 +74,9 @@ Tensor& glu_backward_cpu_out(const Tensor& grad_output, const Tensor& input,
   // for second gradinput half, can get a better performance by fusion
   auto iter = at::TensorIteratorConfig()
     .add_output(gradInputsecondHalf)
-    .add_input(gradInputfirstHalf)
-    .add_input(firstHalf)
-    .add_input(grad_output)
+    .add_const_input(gradInputfirstHalf)
+    .add_const_input(firstHalf)
+    .add_const_input(grad_output)
     .build();
   glu_backward_stub(iter.device_type(), iter);
   gradInputfirstHalf.mul_(grad_output);
@@ -100,10 +102,10 @@ Tensor glu_jvp(
   auto dglu = at::empty_like(glu);
   auto iter = at::TensorIteratorConfig()
     .add_output(dglu)
-    .add_input(glu)
-    .add_input(b)
-    .add_input(da)
-    .add_input(db)
+    .add_const_input(glu)
+    .add_const_input(b)
+    .add_const_input(da)
+    .add_const_input(db)
     .build();
   glu_jvp_stub(iter.device_type(), iter);
   return dglu;
@@ -153,5 +155,4 @@ Tensor glu_backward_jvp(
 }
 
 
-} // at::native
-} // at
+} // namespace at::native

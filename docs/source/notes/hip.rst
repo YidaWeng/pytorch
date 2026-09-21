@@ -77,7 +77,14 @@ which version of PyTorch you are using, refer to this example below::
 TensorFloat-32(TF32) on ROCm
 ----------------------------
 
-TF32 is not supported on ROCm.
+TF32 is supported on AMD Instinct MI300 (gfx942, CDNA3) via hipBLASLt. The
+same ``torch.backends.cuda.matmul.fp32_precision`` and
+``torch.backends.cuda.matmul.allow_tf32`` controls used on NVIDIA hardware
+also apply on ROCm, except that the ``"bfx9"`` precision mode is NVIDIA-only
+and raises an error on ROCm because rocBLAS and hipBLASLt have no corresponding
+nine-product compute mode. The TF32 path on MI300 has hardware-level numerical
+differences from the NVIDIA implementation; see :ref:`tf32_on_mi300` for
+details.
 
 .. _rocm-memory-management:
 
@@ -87,7 +94,7 @@ Memory management
 PyTorch uses a caching memory allocator to speed up memory allocations. This
 allows fast memory deallocation without device synchronizations. However, the
 unused memory managed by the allocator will still show as if used in
-``rocm-smi``. You can use :meth:`~torch.cuda.memory_allocated` and
+``amd-smi``. You can use :meth:`~torch.cuda.memory_allocated` and
 :meth:`~torch.cuda.max_memory_allocated` to monitor memory occupied by
 tensors, and use :meth:`~torch.cuda.memory_reserved` and
 :meth:`~torch.cuda.max_memory_reserved` to monitor the total amount of memory
@@ -103,7 +110,26 @@ complete snapshot of the memory allocator state via
 underlying allocation patterns produced by your code.
 
 To debug memory errors, set
-``PYTORCH_NO_CUDA_MEMORY_CACHING=1`` in your environment to disable caching.
+``PYTORCH_NO_HIP_MEMORY_CACHING=1`` in your environment to disable caching.
+``PYTORCH_NO_CUDA_MEMORY_CACHING=1`` is also accepted for ease of porting.
+
+.. hipblas-workspaces:
+
+hipBLAS workspaces
+------------------
+
+Unlike CUDA, ROCm continues to cache workspaces by default.
+
+For each combination of hipBLAS handle and HIP stream, a hipBLAS workspace will be allocated if that
+handle and stream combination executes a hipBLAS kernel that requires a workspace.  In order to
+avoid repeatedly allocating workspaces, these workspaces are not deallocated unless
+``torch._C._cuda_clearCublasWorkspaces()`` is called; note that it's the same function for CUDA or
+HIP. The workspace size per allocation can be specified via the environment variable
+``HIPBLAS_WORKSPACE_CONFIG`` with the format ``:[SIZE]:[COUNT]``.  As an example, the environment
+variable ``HIPBLAS_WORKSPACE_CONFIG=:4096:2:16:8`` specifies a total size of ``2 * 4096 + 8 * 16
+KiB`` or 8 MIB. The default workspace size is 32 MiB; MI300 and newer defaults to 128 MiB. To force
+hipBLAS to avoid using workspaces, set ``HIPBLAS_WORKSPACE_CONFIG=:0:0``. For convenience,
+``CUBLAS_WORKSPACE_CONFIG`` is also accepted.
 
 .. _hipfft-plan-cache:
 
@@ -111,6 +137,37 @@ hipFFT/rocFFT plan cache
 ------------------------
 
 Setting the size of the cache for hipFFT/rocFFT plans is not supported.
+
+.. _rocm-gds:
+
+hipFile (GPUDirect Storage)
+---------------------------
+
+The ``torch.cuda.gds`` APIs are implemented with `hipFile
+<https://rocm.docs.amd.com/projects/hipFile/en/latest/>`_ on ROCm, taking the
+place of cuFile on CUDA. hipFile ships with ROCm 7.14 and later; on older ROCm
+the build disables GDS support and :func:`torch.cuda.gds.is_available` returns
+``False``. As elsewhere in the HIP port, the build option keeps its CUDA name,
+so ``USE_CUFILE=0`` is what disables the support in a ROCm build. hipFile is
+Linux-only, so a Windows ROCm build never has GDS support.
+
+Each wrapper in ``torch.cuda.gds`` calls the hipFile counterpart of the
+cuFile function named in its docstring: ``hipFileRead``, ``hipFileWrite``,
+``hipFileBufRegister``, ``hipFileBufDeregister``, ``hipFileHandleRegister`` and
+``hipFileHandleDeregister``. Errors quote the hipFile name, so a failed read
+raises ``hipFileRead failed: ...``. hipFile is close to cuFile but not identical;
+the known divergences, including that numeric error codes are not guaranteed to
+match, are listed in `cuFile compatibility
+<https://rocm.docs.amd.com/projects/hipFile/en/latest/reference/hipFile-cuFile-compatibility.html>`_.
+
+Configuring a system for GDS on ROCm differs from CUDA, and the NVIDIA
+GPUDirect Storage installation and troubleshooting guide does not apply. Refer
+instead to the hipFile documentation:
+
+* `Install hipFile <https://rocm.docs.amd.com/projects/hipFile/en/latest/install/install.html>`_
+* `Check for fastpath compatibility <https://rocm.docs.amd.com/projects/hipFile/en/latest/how-to/checking-system-compatibility.html>`_
+* `Set up a local NVMe drive <https://rocm.docs.amd.com/projects/hipFile/en/latest/how-to/setup-local-nvme.html>`_
+* `Troubleshooting <https://rocm.docs.amd.com/projects/hipFile/en/latest/troubleshooting/troubleshooting.html>`_
 
 .. _torch-distributed-backends:
 
@@ -124,20 +181,27 @@ Currently, only the "nccl" and "gloo" backends for torch.distributed are support
 CUDA API to HIP API mappings in C++
 -----------------------------------
 
-Please refer: https://rocmdocs.amd.com/en/latest/Programming_Guides/HIP_API_Guide.html
+Please refer: https://rocm.docs.amd.com/projects/HIP/en/latest/reference/api_syntax.html
 
 NOTE: The CUDA_VERSION macro, cudaRuntimeGetVersion and cudaDriverGetVersion APIs do not
 semantically map to the same values as HIP_VERSION macro, hipRuntimeGetVersion and
 hipDriverGetVersion APIs. Please do not use them interchangeably when doing version checks.
 
-Eg: Instead of
-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
-If it is desired to not take the code path for ROCm/HIP:
-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000 && !defined(USE_ROCM)
-If it is desired to take the code path for ROCm/HIP:
-#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || defined(USE_ROCM)
-If it is desired to take the code path for ROCm/HIP only for specific HIP versions:
-#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 40300)
+For example: Instead of using
+
+``#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000`` to implicitly exclude ROCm/HIP,
+
+use the following to not take the code path for ROCm/HIP:
+
+``#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000 && !defined(USE_ROCM)``
+
+Alternatively, if it is desired to take the code path for ROCm/HIP:
+
+``#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || defined(USE_ROCM)``
+
+Or if it is desired to take the code path for ROCm/HIP only for specific HIP versions:
+
+``#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 40300)``
 
 
 Refer to CUDA Semantics doc
@@ -155,3 +219,62 @@ by recompiling the PyTorch from source.
 Please add below line as an argument to cmake command parameters::
 
     -DROCM_FORCE_ENABLE_GPU_ASSERTS:BOOL=ON
+
+Enabling/Disabling ROCm Composable Kernel
+-----------------------------------------
+
+Enabling composable_kernel (CK) for both SDPA and GEMMs is a two-part process. First the user must have built
+pytorch while setting the corresponding environment variable to '1'
+
+SDPA:
+``USE_ROCM_CK_SDPA=1``
+
+GEMMs:
+``USE_ROCM_CK_GEMM=1``
+
+Second, the user must explicitly request that CK be used as the backend library via the corresponding python
+call
+
+SDPA:
+``setROCmFAPreferredBackend('<choice>')``
+
+GEMMs:
+``setBlasPreferredBackend('<choice>')``
+
+To enable CK in either scenario, simply pass 'ck' to those functions.
+
+In order to set the backend to CK, the user MUST have built with the correct environment variable. If not,
+PyTorch will print a warning and use the "default" backend. For GEMMs, this will route to hipblas and
+for SDPA it routes to aotriton.
+
+.. _sdpa-input-layout-on-rocm:
+
+SDPA input layout on ROCm
+-------------------------
+
+The AOTriton backend for
+:func:`~torch.nn.functional.scaled_dot_product_attention` selects kernel
+configurations from a tuning database that assumes contiguous BHSD
+(batch, heads, seqlen, head_dim) inputs. Inputs that are BHSD-shaped but
+not contiguous, such as the view produced by ``permute(0, 2, 1, 3)`` on a
+BSHD tensor, fall outside the tuned configuration space and may select a
+suboptimal kernel.
+
+Materializing contiguous inputs first trades a copy for a better kernel
+choice, so whether it wins depends on device, shape and dtype. It is
+generally not profitable on discrete GPUs, where the copy overhead tends to
+outweigh the kernel benefit. It has been observed to be a large win on the
+AMD gfx1151 iGPU at long sequence lengths (see
+`#190154 <https://github.com/pytorch/pytorch/issues/190154>`_ for measurements).
+Time both forms end to end, including the copies, on the shapes and dtype
+your model actually uses::
+
+    def sdpa_permute(q, k, v):
+        q2, k2, v2 = (x.permute(0, 2, 1, 3) for x in (q, k, v))
+        out = torch.nn.functional.scaled_dot_product_attention(q2, k2, v2)
+        return out.permute(0, 2, 1, 3)
+
+    def sdpa_contiguous(q, k, v):
+        q2, k2, v2 = (x.transpose(1, 2).contiguous() for x in (q, k, v))
+        out = torch.nn.functional.scaled_dot_product_attention(q2, k2, v2)
+        return out.transpose(1, 2)

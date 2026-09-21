@@ -4,7 +4,6 @@
 
 #include <c10/macros/Macros.h>
 #include <clocale>
-#include <cstdlib>
 
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <xlocale.h>
@@ -22,14 +21,9 @@
 // respective
 //   C stdlib functions
 
-#include <cctype>
-#include <cerrno>
-#include <cmath>
-#include <cstring>
 #include <locale>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 #ifdef _MSC_VER
 double strtod_c(const char* nptr, char** endptr) {
@@ -48,5 +42,4 @@ float strtof_c(const char* nptr, char** endptr) {
   return (float)strtod_c(nptr, endptr);
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

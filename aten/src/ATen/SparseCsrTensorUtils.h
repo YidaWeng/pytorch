@@ -2,8 +2,16 @@
 
 #include <ATen/SparseCsrTensorImpl.h>
 #include <ATen/SparseTensorImpl.h>
-#include <ATen/SparseTensorUtils.h>
 #include <ATen/core/Tensor.h>
+
+#ifndef AT_PER_OPERATOR_HEADERS
+#include <ATen/Functions.h>
+#include <ATen/NativeFunctions.h>
+#include <ATen/Operators.h>
+#else
+#include <ATen/ops/_sparse_compressed_tensor_unsafe.h>
+#include <ATen/ops/resize_as_sparse_native.h>
+#endif
 
 #define AT_DISPATCH_ALL_SPARSE_COMPRESSED_LAYOUTS(LAYOUT, NAME, ...) \
   [&] {                                                              \
@@ -15,8 +23,9 @@
       case kSparseBsc:                                               \
         return __VA_ARGS__();                                        \
       default:                                                       \
-        AT_ERROR(                                                    \
-            #NAME,                                                   \
+        TORCH_CHECK(                                                 \
+            false,                                                   \
+            NAME,                                                    \
             " expected sparse compressed tensor layout but got ",    \
             the_layout);                                             \
     }                                                                \
@@ -34,8 +43,9 @@
       case kSparseBsc:                                            \
         return (COLUMN_DIM_ACTION)();                             \
       default:                                                    \
-        AT_ERROR(                                                 \
-            #NAME,                                                \
+        TORCH_CHECK(                                              \
+            false,                                                \
+            NAME,                                                 \
             " expected sparse compressed tensor layout but got ", \
             the_layout);                                          \
     }                                                             \
@@ -53,8 +63,9 @@
       case kSparseBsc:                                            \
         return (BLOCK_ACTION)();                                  \
       default:                                                    \
-        AT_ERROR(                                                 \
-            #NAME,                                                \
+        TORCH_CHECK(                                              \
+            false,                                                \
+            NAME,                                                 \
             " expected sparse compressed tensor layout but got ", \
             the_layout);                                          \
     }                                                             \
@@ -69,8 +80,9 @@
       case kSparseBsr:                                                \
         return (ROW_DIM_ACTION)();                                    \
       default:                                                        \
-        AT_ERROR(                                                     \
-            #NAME,                                                    \
+        TORCH_CHECK(                                                  \
+            false,                                                    \
+            NAME,                                                     \
             " expected sparse row compressed tensor layout but got ", \
             the_layout);                                              \
     }                                                                 \
@@ -85,8 +97,9 @@
       case kSparseBsc:                                                   \
         return (COL_DIM_ACTION)();                                       \
       default:                                                           \
-        AT_ERROR(                                                        \
-            #NAME,                                                       \
+        TORCH_CHECK(                                                     \
+            false,                                                       \
+            NAME,                                                        \
             " expected sparse column compressed tensor layout but got ", \
             the_layout);                                                 \
     }                                                                    \
@@ -100,8 +113,9 @@
       case kSparseCsc:                                                        \
         return (ACTION)();                                                    \
       default:                                                                \
-        AT_ERROR(                                                             \
-            #NAME,                                                            \
+        TORCH_CHECK(                                                          \
+            false,                                                            \
+            NAME,                                                             \
             " expected sparse compressed (non-block) tensor layout but got ", \
             the_layout);                                                      \
     }                                                                         \
@@ -115,15 +129,43 @@
       case kSparseBsc:                                                    \
         return (ACTION)();                                                \
       default:                                                            \
-        AT_ERROR(                                                         \
-            #NAME,                                                        \
+        TORCH_CHECK(                                                      \
+            false,                                                        \
+            NAME,                                                         \
             " expected sparse compressed block tensor layout but got ",   \
             the_layout);                                                  \
     }                                                                     \
   }()
 
-namespace at {
-namespace sparse_csr {
+#define AT_DISPATCH_SPARSE_VALUE_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(                                   \
+      TYPE,                                             \
+      NAME,                                             \
+      AT_DISPATCH_CASE_ALL_TYPES_AND_COMPLEX_AND5(      \
+          kComplexHalf, kBComplex32, kHalf, kBool, kBFloat16, __VA_ARGS__))
+
+namespace at::sparse_csr {
+
+// Implements RAII object to manage checking sparse tensor invariants:
+class CheckSparseTensorInvariants {
+  std::optional<bool> old_state;
+
+ public:
+  CheckSparseTensorInvariants(bool state)
+      : old_state(at::globalContext().checkSparseTensorInvariants()) {
+    at::globalContext().setCheckSparseTensorInvariants(state);
+  }
+  CheckSparseTensorInvariants(CheckSparseTensorInvariants&& other) = delete;
+  CheckSparseTensorInvariants(const CheckSparseTensorInvariants&) = delete;
+  CheckSparseTensorInvariants& operator=(const CheckSparseTensorInvariants&) =
+      delete;
+  CheckSparseTensorInvariants& operator=(CheckSparseTensorInvariants&&) =
+      delete;
+
+  ~CheckSparseTensorInvariants() {
+    at::globalContext().setCheckSparseTensorInvariants(old_state);
+  }
+};
 
 using SparseCsrTensor = Tensor;
 
@@ -229,22 +271,22 @@ inline std::string plainDimName(Layout layout) {
   }
 }
 
-inline int rowDimension(Layout layout, IntArrayRef size) {
+inline size_t rowDimension(Layout layout, IntArrayRef size) {
   return size.size() - (isCompressedRow(layout) ? 2 : 1);
 }
 
-inline int columnDimension(Layout layout, IntArrayRef size) {
+inline size_t columnDimension(Layout layout, IntArrayRef size) {
   return size.size() - (isCompressedColumn(layout) ? 2 : 1);
 }
 
-inline int compressedDimension(
+inline size_t compressedDimension(
     Layout layout,
     IntArrayRef size,
     size_t dense_ndim = 0) {
   return size.size() - dense_ndim - (isCompressedRow(layout) ? 2 : 1);
 }
 
-inline int plainDimension(
+inline size_t plainDimension(
     Layout layout,
     IntArrayRef size,
     size_t dense_ndim = 0) {
@@ -271,6 +313,21 @@ inline std::pair<Tensor, Tensor> getCompressedPlainIndices(Tensor const& self) {
       });
 }
 
+inline ScalarType getIndexDtype(Tensor const& self) {
+  switch (self.layout()) {
+    case kSparseCsr:
+    case kSparseBsr:
+      return self.crow_indices().scalar_type();
+    case kSparseCsc:
+    case kSparseBsc:
+      return self.ccol_indices().scalar_type();
+    case kSparse:
+      return self._indices().scalar_type();
+    default:
+      return ScalarType::Long;
+  }
+}
+
 inline Layout flip_compressed_layout(Layout layout) {
   switch (layout) {
     case kSparseCsr:
@@ -287,5 +344,121 @@ inline Layout flip_compressed_layout(Layout layout) {
   }
 }
 
-} // namespace sparse_csr
-} // namespace at
+inline DimVector getBlockSize(Tensor const& self) {
+  int64_t n_batch = numBatchDimensions(self);
+  return at::DimVector(self.values().sizes().slice(n_batch + 1, 2));
+}
+
+inline at::OptionalArray<at::SymInt> getSymIntBlockSize(Tensor const& self) {
+  if (self.layout() == at::kSparseBsr || self.layout() == at::kSparseBsc) {
+    int64_t n_batch = numBatchDimensions(self);
+    return self.values().sym_sizes().slice(n_batch + 1, 2).vec();
+  } else {
+    return {};
+  }
+}
+
+template <typename binary_op_t, typename binary_op_out_t>
+inline bool only_sparse_compressed_binary_op_trivial_cases(
+    const Tensor& self,
+    const Tensor& other,
+    const Scalar& alpha,
+    Tensor& out,
+    const binary_op_t& binary_op,
+    const binary_op_out_t& binary_op_out) {
+  // Only sparse compressed! Just like the name says :)
+  TORCH_INTERNAL_ASSERT(at::sparse_csr::is_sparse_compressed(self));
+  TORCH_INTERNAL_ASSERT(at::sparse_csr::is_sparse_compressed(other));
+  TORCH_INTERNAL_ASSERT(at::sparse_csr::is_sparse_compressed(out));
+
+  // Bypass BLAS if there are matches in (self, other, out)
+  if (self.is_same(out) && self.is_same(other)) {
+    binary_op_out(self.values(), other.values(), alpha);
+    return true;
+  }
+  if (self.is_same(other)) {
+    auto [compressed_indices, plain_indices] =
+        at::sparse_csr::getCompressedPlainIndices(self);
+    // Clone so out does not share index storage with self; a later
+    // out-of-place op writing into out would otherwise corrupt self.
+    static_cast<SparseCsrTensorImpl*>(out.unsafeGetTensorImpl())
+        ->set_member_tensors(
+            compressed_indices.clone(),
+            plain_indices.clone(),
+            binary_op(self.values(), other.values(), alpha),
+            self.sizes());
+    return true;
+  }
+  return false;
+}
+
+// True if any member tensor of a shares storage with the same member of b.
+inline bool sparse_compressed_members_alias(const Tensor& a, const Tensor& b) {
+  auto [a_compressed, a_plain] = at::sparse_csr::getCompressedPlainIndices(a);
+  auto [b_compressed, b_plain] = at::sparse_csr::getCompressedPlainIndices(b);
+  return a_compressed.is_alias_of(b_compressed) ||
+      a_plain.is_alias_of(b_plain) || a.values().is_alias_of(b.values());
+}
+
+inline bool only_sparse_compressed_add_trivial_cases(
+    const Tensor& self,
+    const Tensor& other,
+    const Scalar& alpha,
+    Tensor& out) {
+  return only_sparse_compressed_binary_op_trivial_cases(
+      self,
+      other,
+      alpha,
+      out,
+      [](const Tensor& v1, const Tensor& v2, const Scalar& alpha) {
+        return v1.add(v2, alpha);
+      },
+      [](const Tensor& v1, const Tensor& v2, const Scalar& alpha) {
+        return v1.add_(v2, alpha);
+      });
+}
+
+inline Tensor to_type(const Tensor& input, ScalarType dtype) {
+  auto [compressed_indices, plain_indices] =
+      at::sparse_csr::getCompressedPlainIndices(input);
+  return at::_sparse_compressed_tensor_unsafe(
+      compressed_indices,
+      plain_indices,
+      std::move(input.values()).to(dtype),
+      input.sizes(),
+      dtype,
+      input.layout(),
+      input.device(),
+      input.options().pinned_memory_opt());
+}
+
+template <typename acc_t, typename scalar_t>
+inline std::tuple<Tensor, Tensor> create_acc_buffer(
+    TensorOptions option,
+    ScalarType type,
+    int64_t nnz = -1) {
+  Tensor new_values, new_values_acc;
+  constexpr bool need_acc = !std::is_same_v<scalar_t, acc_t>;
+  bool is_integral = at::isIntegralType(type, /*includeBool=*/true);
+  if constexpr (need_acc) {
+    auto acc_dtype = CppTypeToScalarType<acc_t>::value;
+    new_values_acc = at::empty({}, option.dtype(acc_dtype));
+    new_values = is_integral ? new_values_acc : at::empty({}, option);
+  } else {
+    new_values = new_values_acc = at::empty({}, option);
+  }
+  if (nnz != -1) {
+    return std::make_tuple(
+        new_values.resize_(nnz), new_values_acc.resize_(nnz));
+  } else {
+    return std::make_tuple(std::move(new_values), std::move(new_values_acc));
+  }
+}
+
+inline void copy_from_acc_buffer(Tensor& new_values, Tensor& new_values_acc) {
+  if (!new_values_acc.is_same(new_values)) {
+    new_values.copy_(new_values_acc);
+  }
+}
+
+} // namespace at::sparse_csr

@@ -8,6 +8,7 @@
 
 #include <c10/core/DeviceArray.h>
 #include <c10/util/Load.h>
+#include <utility>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -16,9 +17,7 @@
 #include <ATen/ops/empty.h>
 #endif
 
-namespace at {
-namespace native {
-namespace internal {
+namespace at::native::internal {
 
 namespace {
 
@@ -48,7 +47,7 @@ const scalar_t * wrap_input_iterator(const scalar_t *data) {
 }
 
 struct LoadBoolOp {
-  __device__ bool operator()(uint8_t x) const {
+  __device__ int operator()(uint8_t x) const {
     return static_cast<bool>(x);
   }
 };
@@ -56,7 +55,7 @@ struct LoadBoolOp {
 auto wrap_input_iterator(const bool *data) {
   // See NOTE [Loading boolean values]
   LoadBoolOp op;
-  return NO_ROCM(at_cuda_detail)::cub::TransformInputIterator<bool, LoadBoolOp, const uint8_t*, int>(
+  return ATEN_CUB_TRANSFORM_ITERATOR(bool, LoadBoolOp, const uint8_t*)(
       reinterpret_cast<const uint8_t*>(data), op);
 }
 
@@ -71,7 +70,7 @@ std::tuple<Tensor, Tensor, Tensor> compute_unique(
     const bool consecutive) {
   int64_t num_inp = sorted.numel();
   auto options = sorted.options().dtype(kLong);
-  auto data = wrap_input_iterator(sorted.data_ptr<scalar_t>());
+  auto data = wrap_input_iterator(sorted.const_data_ptr<scalar_t>());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // inverse indices
@@ -82,12 +81,12 @@ std::tuple<Tensor, Tensor, Tensor> compute_unique(
     inverse_indices = at::empty(sorted.sizes(), options);
     Tensor inv_loc = consecutive ? at::empty({num_inp}, options.dtype(kInt))
                                  : inverse_indices;
-    int* inv_loc_ptr = static_cast<int*>(inv_loc.data_ptr());
+    int* inv_loc_ptr = static_cast<int*>(inv_loc.mutable_data_ptr());
     const dim3 block =
         dim3(std::min(static_cast<int64_t>(cuda::getApplyBlock().x), num_inp));
     dim3 grid;
-    int curDevice = -1;
-    cudaGetDevice(&curDevice);
+    c10::DeviceIndex curDevice = -1;
+    C10_CUDA_CHECK(c10::cuda::GetDevice(&curDevice));
     cuda::getApplyGrid(num_inp, grid, curDevice);
     adjacent_difference_kernel<<<grid, block, 0, stream>>>(
         num_inp, data, inv_loc_ptr);
@@ -97,7 +96,7 @@ std::tuple<Tensor, Tensor, Tensor> compute_unique(
         consecutive ? inverse_indices : at::empty({num_inp}, options);
     at::cuda::cub::inclusive_sum_truncating(
         inv_loc_ptr,
-        inv_loc_out.data_ptr<int64_t>(),
+        inv_loc_out.mutable_data_ptr<int64_t>(),
         num_inp);
 
     if (!consecutive) {
@@ -106,9 +105,9 @@ std::tuple<Tensor, Tensor, Tensor> compute_unique(
           "return_inverse is set to true, but sorted_indices is undefined. Send a bug report!");
       scatter_kernel<<<grid, block, 0, stream>>>(
           num_inp,
-          inv_loc_out.data_ptr<int64_t>(),
-          sorted_indices.data_ptr<int64_t>(),
-          inverse_indices.data_ptr<int64_t>());
+          inv_loc_out.const_data_ptr<int64_t>(),
+          sorted_indices.const_data_ptr<int64_t>(),
+          inverse_indices.mutable_data_ptr<int64_t>());
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
   }
@@ -119,15 +118,15 @@ std::tuple<Tensor, Tensor, Tensor> compute_unique(
   Tensor length = at::empty({1}, options);
   int64_t num_out;
   if (!return_counts) {
-    cuda::cub::unique(data, data_out.data_ptr<scalar_t>(), length.data_ptr<int64_t>(), num_inp);
+    cuda::cub::unique(data, data_out.mutable_data_ptr<scalar_t>(), length.mutable_data_ptr<int64_t>(), num_inp);
     num_out = length.item<int64_t>();
   } else {
     counts.resize_(num_inp);
     at::cuda::cub::run_length_encode(
         data,
-        data_out.data_ptr<scalar_t>(),
-        counts.data_ptr<int64_t>(),
-        length.data_ptr<int64_t>(),
+        data_out.mutable_data_ptr<scalar_t>(),
+        counts.mutable_data_ptr<int64_t>(),
+        length.mutable_data_ptr<int64_t>(),
         num_inp);
     num_out = length.item<int64_t>();
     counts.resize_(num_out);
@@ -135,7 +134,7 @@ std::tuple<Tensor, Tensor, Tensor> compute_unique(
 
   data_out.resize_(num_out);
   return std::tuple<Tensor, Tensor, Tensor>(
-      data_out, inverse_indices, counts);
+      std::move(data_out), std::move(inverse_indices), std::move(counts));
 }
 
 } // namespace
@@ -151,8 +150,6 @@ struct UniqueCub {
       const bool consecutive,
       const bool return_inverse,
       const bool return_counts) {
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
     int64_t num_inp = self.numel();
     Tensor sorted;
     if (consecutive) {
@@ -160,12 +157,14 @@ struct UniqueCub {
     } else {
       sorted = at::empty(self.sizes(), self.options());
     }
-    scalar_t* sorted_data = sorted.data_ptr<scalar_t>();
 
     Tensor sorted_indices;
     if (!return_inverse) {
       if (!consecutive) {
-        cuda::cub::radix_sort_keys(self.data_ptr<scalar_t>(), sorted_data, num_inp);
+        cuda::cub::radix_sort_keys(
+          self.const_data_ptr<scalar_t>(),
+          sorted.mutable_data_ptr<scalar_t>(),
+          num_inp);
       }
     } else {
       if (!consecutive) {
@@ -173,10 +172,10 @@ struct UniqueCub {
         Tensor range = at::arange(0, num_inp, options);
         sorted_indices = at::empty({num_inp}, options);
         cuda::cub::radix_sort_pairs(
-            self.data_ptr<scalar_t>(),
-            sorted_data,
-            range.data_ptr<int64_t>(),
-            sorted_indices.data_ptr<int64_t>(),
+            self.const_data_ptr<scalar_t>(),
+            sorted.mutable_data_ptr<scalar_t>(),
+            range.const_data_ptr<int64_t>(),
+            sorted_indices.mutable_data_ptr<int64_t>(),
             num_inp);
       }
     }
@@ -257,12 +256,12 @@ struct UniqueCub<bool> {
     auto allocator = at::cuda::getCUDADeviceAllocator();
     c10::DeviceArray<int> tmp_num_true(*allocator, 1);
 
-    const bool* self_data = self.data_ptr<bool>();
+    const bool* self_data = self.const_data_ptr<bool>();
     MapNumberOfTrueValues op;
-    NO_ROCM(at_cuda_detail)::cub::TransformInputIterator<int, MapNumberOfTrueValues, const uint8_t*, int>
+    ATEN_CUB_TRANSFORM_ITERATOR(int, MapNumberOfTrueValues, const uint8_t*)
         data_iter(reinterpret_cast<const uint8_t*>(self_data), op);
     at::cuda::cub::reduce(data_iter, tmp_num_true.get(), num_inp,
-                          NO_ROCM(at_cuda_detail)::cub::Sum{}, 0);
+                          NO_ROCM(::cuda)::std::plus<>{}, 0);
 
     auto options = self.options();
     output = at::empty({2}, self.options());
@@ -271,8 +270,8 @@ struct UniqueCub<bool> {
     unique_bool_write_output<<<1, 1, 0, stream>>>(
         num_inp,
         tmp_num_true.get(),
-        output.data_ptr<bool>(),
-        counts.data_ptr<int64_t>());
+        output.mutable_data_ptr<bool>(),
+        counts.mutable_data_ptr<int64_t>());
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     if (return_inverse) {
@@ -284,11 +283,11 @@ struct UniqueCub<bool> {
           num_inp,
           tmp_num_true.get(),
           self_data,
-          return_inverse ? inverse_indices.data_ptr<int64_t>() : nullptr);
+          inverse_indices.mutable_data_ptr<int64_t>());
       C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 
-    // Final sync to fix the ouput tensors shape
+    // Final sync to fix the output tensors shape
     int num_true = 0;
     at::cuda::memcpy_and_sync(&num_true, tmp_num_true.get(), sizeof(int),
                               cudaMemcpyDeviceToHost, stream);
@@ -297,7 +296,8 @@ struct UniqueCub<bool> {
     output.resize_({num_out});
     counts.resize_({num_out});
 
-    return std::tuple<Tensor, Tensor, Tensor>(output, inverse_indices, counts);
+    return std::tuple<Tensor, Tensor, Tensor>(
+        std::move(output), std::move(inverse_indices), std::move(counts));
   }
 };
 
@@ -335,11 +335,13 @@ INSTANTIATE_UNIQUE_CUDA_TEMPLATE(float);
 INSTANTIATE_UNIQUE_CUDA_TEMPLATE(int32_t);
 INSTANTIATE_UNIQUE_CUDA_TEMPLATE(int64_t);
 INSTANTIATE_UNIQUE_CUDA_TEMPLATE(int16_t);
+INSTANTIATE_UNIQUE_CUDA_TEMPLATE(uint32_t);
+INSTANTIATE_UNIQUE_CUDA_TEMPLATE(uint64_t);
+INSTANTIATE_UNIQUE_CUDA_TEMPLATE(uint16_t);
 INSTANTIATE_UNIQUE_CUDA_TEMPLATE(bool);
+INSTANTIATE_UNIQUE_CUDA_TEMPLATE(BFloat16);
 INSTANTIATE_UNIQUE_CUDA_TEMPLATE(at::Half);
 
 #undef INSTANTIATE
 
-} // namespace internal
-} // namespace native
-} // namespace at
+} // namespace at::native::internal

@@ -1,9 +1,12 @@
+# mypy: ignore-errors
+
 import collections
 import warnings
+from collections.abc import Sequence
 from functools import partial, wraps
-from typing import Sequence
 
 import numpy as np
+import numpy.typing as npt
 
 import torch
 from torch.testing._internal.common_cuda import TEST_CUDA
@@ -56,10 +59,14 @@ class _dynamic_dispatch_dtypes(_dispatch_dtypes):
 
 def get_supported_dtypes(op, sample_inputs_fn, device_type):
     # Returns the supported dtypes for the given operator and device_type pair.
-    assert device_type in ["cpu", "cuda"]
+    if device_type not in ["cpu", "cuda"]:
+        raise AssertionError(
+            f"Expected device_type in ['cpu', 'cuda'], got {device_type!r}"
+        )
     if not TEST_CUDA and device_type == "cuda":
         warnings.warn(
-            "WARNING: CUDA is not available, empty_dtypes dispatch will be returned!"
+            "WARNING: CUDA is not available, empty_dtypes dispatch will be returned!",
+            stacklevel=2,
         )
         return _dynamic_dispatch_dtypes(())
 
@@ -67,13 +74,14 @@ def get_supported_dtypes(op, sample_inputs_fn, device_type):
     for dtype in all_types_and_complex_and(torch.bool, torch.bfloat16, torch.half):
         try:
             samples = sample_inputs_fn(op, device_type, dtype, False)
-        except RuntimeError:
+        except (RuntimeError, TypeError):
             # If `sample_inputs_fn` doesn't support sampling for a given
             # `dtype`, we assume that the `dtype` is not supported.
             # We raise a warning, so that user knows that this was the case
             # and can investigate if there was an issue with the `sample_inputs_fn`.
             warnings.warn(
-                f"WARNING: Unable to generate sample for device:{device_type} and dtype:{dtype}"
+                f"WARNING: Unable to generate sample for device:{device_type} and dtype:{dtype}",
+                stacklevel=2,
             )
             continue
 
@@ -83,7 +91,9 @@ def get_supported_dtypes(op, sample_inputs_fn, device_type):
         for sample in samples:
             try:
                 op(sample.input, *sample.args, **sample.kwargs)
-            except RuntimeError as re:
+            # TODO: Replace RuntimeError with NotImplementedError once unsupported
+            # dtypes consistently use it.
+            except (RuntimeError, TypeError):
                 # dtype is not supported
                 supported = False
                 break
@@ -101,7 +111,7 @@ def dtypes_dispatch_hint(dtypes):
 
     # CUDA is not available, dtypes will be empty.
     if len(dtypes) == 0:
-        return return_type((), str(tuple()))
+        return return_type((), "()")
 
     set_dtypes = set(dtypes)
     for dispatch in COMPLETE_DTYPES_DISPATCH:
@@ -139,16 +149,12 @@ def is_dynamic_dtype_set(op):
 
 
 def str_format_dynamic_dtype(op):
-    fmt_str = """
-        OpInfo({name},
-               dtypes={dtypes},
-               dtypesIfCUDA={dtypesIfCUDA},
+    fmt_str = f"""
+        OpInfo({op.name},
+               dtypes={dtypes_dispatch_hint(op.dtypes).dispatch_fn_str},
+               dtypesIfCUDA={dtypes_dispatch_hint(op.dtypesIfCUDA).dispatch_fn_str},
         )
-        """.format(
-        name=op.name,
-        dtypes=dtypes_dispatch_hint(op.dtypes).dispatch_fn_str,
-        dtypesIfCUDA=dtypes_dispatch_hint(op.dtypesIfCUDA).dispatch_fn_str,
-    )
+        """
 
     return fmt_str
 
@@ -157,7 +163,7 @@ def np_unary_ufunc_integer_promotion_wrapper(fn):
     # Wrapper that passes PyTorch's default scalar
     #   type as an argument to the wrapped NumPy
     #   unary ufunc when given an integer input.
-    #   This mimicks PyTorch's integer->floating point
+    #   This mimics PyTorch's integer->floating point
     #   type promotion.
     #
     # This is necessary when NumPy promotes
@@ -194,7 +200,7 @@ def reference_reduction_numpy(f, supports_keepdims=True):
 
     The wrapper function will forward dim, keepdim, mask, and identity
     kwargs to the wrapped function as the NumPy equivalent axis,
-    keepdims, where, and initiak kwargs, respectively.
+    keepdims, where, and initial kwargs, respectively.
 
     Args:
         f: NumPy reduction operator to wrap
@@ -208,7 +214,7 @@ def reference_reduction_numpy(f, supports_keepdims=True):
     """
 
     @wraps(f)
-    def wrapper(x: np.ndarray, *args, **kwargs):
+    def wrapper(x: npt.NDArray, *args, **kwargs):
         # Copy keys into a set
         keys = set(kwargs.keys())
 
@@ -231,7 +237,10 @@ def reference_reduction_numpy(f, supports_keepdims=True):
         if "mask" in keys:
             mask = kwargs.pop("mask")
             if mask is not None:
-                assert mask.layout == torch.strided
+                if mask.layout != torch.strided:
+                    raise AssertionError(
+                        f"Expected mask.layout == torch.strided, got {mask.layout}"
+                    )
                 kwargs["where"] = mask.cpu().numpy()
 
         if "identity" in keys:
@@ -243,11 +252,6 @@ def reference_reduction_numpy(f, supports_keepdims=True):
                     identity = identity.cpu()
                 kwargs["initial"] = identity.numpy()
 
-        if "unbiased" in keys:
-            unbiased = kwargs.pop("unbiased")
-            if unbiased is not None:
-                kwargs["ddof"] = int(unbiased)
-
         result = f(x, *args, **kwargs)
 
         # Unsqueeze reduced dimensions if NumPy does not support keepdims
@@ -258,3 +262,23 @@ def reference_reduction_numpy(f, supports_keepdims=True):
         return result
 
     return wrapper
+
+
+def prod_numpy(a, *args, **kwargs):
+    """
+    The function will call np.prod with type as np.int64 if the input type
+    is int or uint64 if it is uint. This is necessary because windows np.prod uses by default
+    int32 while on linux it uses int64.
+    This is for fixing integer overflow https://github.com/pytorch/pytorch/issues/77320
+
+    Returns:
+        np.prod of input
+    """
+    if "dtype" not in kwargs:
+        if np.issubdtype(a.dtype, np.signedinteger):
+            a = a.astype(np.int64)
+        elif np.issubdtype(a.dtype, np.unsignedinteger):
+            a = a.astype(np.uint64)
+
+    fn = reference_reduction_numpy(np.prod)
+    return fn(a, *args, **kwargs)

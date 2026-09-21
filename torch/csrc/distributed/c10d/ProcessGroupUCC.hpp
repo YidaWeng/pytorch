@@ -2,7 +2,7 @@
 
 #ifdef USE_C10D_UCC
 
-#include <torch/csrc/distributed/c10d/UCCUtils.hpp>
+#include <torch/csrc/distributed/c10d/ucc/UCCUtils.hpp>
 
 #include <exception>
 #include <memory>
@@ -11,7 +11,7 @@
 #include <thread>
 #include <vector>
 
-#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Utils.hpp>
@@ -53,7 +53,7 @@ struct event_pool_t {
 class Comm;
 
 // UCC does not support multiple CUDA devices per process.
-class TORCH_API ProcessGroupUCC : public ProcessGroup {
+class TORCH_API ProcessGroupUCC : public Backend {
  private:
   void set_timeout(ucc_coll_args_t& args);
 
@@ -119,7 +119,7 @@ class TORCH_API ProcessGroupUCC : public ProcessGroup {
         OpType opType,
         uint64_t seq,
         const char* prof_title,
-        const c10::optional<std::vector<at::Tensor>>& inputs,
+        const std::optional<std::vector<at::Tensor>>& inputs,
         const c10::intrusive_ptr<ProcessGroupUCCLogger>& logger)
         : Work(-1, opType, prof_title, inputs), logger_(logger), seq_(seq) {}
     ~WorkUCC();
@@ -153,7 +153,7 @@ class TORCH_API ProcessGroupUCC : public ProcessGroup {
       const c10::intrusive_ptr<Store>& store,
       int rank = -1,
       int size = -1,
-      std::chrono::duration<float> timeout = kProcessGroupDefaultTimeout);
+      std::chrono::duration<float> timeout = kBackendDefaultTimeout);
 
   void initComm(c10::Device dev);
 
@@ -170,7 +170,7 @@ class TORCH_API ProcessGroupUCC : public ProcessGroup {
   // Performs a health check by initializing dummy UCC & UCX communicators and
   // then destroying them. This will help indicate and signal any
   // UCC/UCX-related issues prior to the first collective. The actual
-  // initialization and subsequent destruction is ran on a separate thread and
+  // initialization and subsequent destruction is run on a separate thread and
   // the main thread is signalled about timeouts/errors to report to the
   // application.
   void runHealthCheck();
@@ -209,7 +209,7 @@ class TORCH_API ProcessGroupUCC : public ProcessGroup {
       std::vector<at::Tensor>& inputTensors,
       const AllgatherOptions& opts = AllgatherOptions()) override;
 
-  c10::intrusive_ptr<Work> _allgather_base(
+  c10::intrusive_ptr<Work> all_gather_single(
       at::Tensor& outputBuffer,
       at::Tensor& inputBuffer,
       const AllgatherOptions& opts = AllgatherOptions()) override;
@@ -232,7 +232,12 @@ class TORCH_API ProcessGroupUCC : public ProcessGroup {
       std::vector<std::vector<at::Tensor>>& inputTensors,
       const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
-  c10::intrusive_ptr<Work> alltoall_base(
+  c10::intrusive_ptr<Work> reduce_scatter_single(
+      at::Tensor& outputTensor,
+      at::Tensor& inputTensor,
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
+
+  c10::intrusive_ptr<Work> all_to_all_single(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
       std::vector<int64_t>& outputSplitSizes,
@@ -257,16 +262,12 @@ class TORCH_API ProcessGroupUCC : public ProcessGroup {
   // Counting for the sequential number of UCC collective_post call.
   uint64_t seq_{0};
 
-  // Agrees on an initial sequence number for the whole group by having rank 0
-  // create it and broadcast it to other ranks using the store.
-  void setSequenceNumberForGroup() override;
-
   // Retrieves the current sequence number for the whole group, which should be
   // in sync. If the returned number is not consistent across the group, it
   // may indicate that there is some sort of collective desynchronization.
   uint64_t getSequenceNumberForGroup() override;
 
-  static c10::intrusive_ptr<ProcessGroup> createProcessGroupUCC(
+  static c10::intrusive_ptr<Backend> createProcessGroupUCC(
       const c10::intrusive_ptr<::c10d::Store>& store,
       int rank,
       int size,
@@ -279,9 +280,11 @@ class TORCH_API ProcessGroupUCC : public ProcessGroup {
   uint32_t comm_id;
   ucc_team_h team{nullptr};
   ucc_ee_h cuda_ee{nullptr};
+  ucc_ee_h cuda_ee_p2p[2]{nullptr, nullptr};
 
 #ifdef USE_CUDA
   std::unique_ptr<at::cuda::CUDAStream> stream = nullptr;
+  std::unique_ptr<at::cuda::CUDAStream> stream_p2p[2] = {nullptr, nullptr};
   event_pool_t ep;
 #endif
   c10::intrusive_ptr<ProcessGroupUCCLogger> logger;

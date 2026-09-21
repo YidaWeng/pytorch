@@ -1,13 +1,15 @@
+# mypy: allow-untyped-defs
+import warnings
+
 import torch
 import torch.distributed.algorithms.model_averaging.averagers as averagers
-import warnings
 
 
 class PostLocalSGDOptimizer(torch.optim.Optimizer):
     r"""
     Wraps an arbitrary :class:`torch.optim.Optimizer` and runs `post-local SGD <https://arxiv.org/abs/1808.07217>`_,
     This optimizer runs local optimizer at every step.
-    After the warm-up stage, it averages parameters periodically afer the local optimizer is applied.
+    After the warm-up stage, it averages parameters periodically after the local optimizer is applied.
 
     Args:
         optim: The local optimizer.
@@ -53,17 +55,13 @@ class PostLocalSGDOptimizer(torch.optim.Optimizer):
         >>>    opt.step()
     """
 
-    def __init__(
-        self,
-        optim: torch.optim.Optimizer,
-        averager: averagers.ModelAverager
-    ):
+    def __init__(self, optim: torch.optim.Optimizer, averager: averagers.ModelAverager):
         self.optim = optim
         self.param_groups = self.optim.param_groups
         self.averager = averager
 
     @property
-    def state(self):
+    def state(self):  # type: ignore[override]
         return self.optim.state
 
     def __repr__(self):
@@ -76,7 +74,7 @@ class PostLocalSGDOptimizer(torch.optim.Optimizer):
         to ensure reload does not cause unnecessary warm up again.
         """
         optim_state_dict = self.optim.state_dict()
-        optim_state_dict['step'] = self.averager.step
+        optim_state_dict["step"] = self.averager.step
         return optim_state_dict
 
     def load_state_dict(self, state_dict):
@@ -89,21 +87,24 @@ class PostLocalSGDOptimizer(torch.optim.Optimizer):
         it will raise a warning and initialize the model averager's step to 0.
         """
         self.optim.load_state_dict(state_dict)
-        if 'step' in state_dict:
-            self.averager.step = state_dict['step']
+        if "step" in state_dict:
+            self.averager.step = state_dict["step"]
         else:
-            warnings.warn("Loaded state dict does not contain a step counter for an averager. "
-                          "Setting step counter to 0.")
+            warnings.warn(
+                "Loaded state dict does not contain a step counter for an averager. "
+                "Setting step counter to 0.",
+                stacklevel=2,
+            )
             self.averager.step = 0
 
-    def step(self):
+    def step(self):  # type: ignore[override]
         r"""
         Performs a single optimization step (parameter update).
         """
         self.optim.step()
         self.averager.average_parameters(params=self.param_groups)
 
-    def zero_grad(self, set_to_none: bool = False):  # type: ignore[override]
+    def zero_grad(self, set_to_none: bool = True):  # type: ignore[override]
         self.optim.zero_grad(set_to_none=set_to_none)
 
     def add_param_group(self, param_group):

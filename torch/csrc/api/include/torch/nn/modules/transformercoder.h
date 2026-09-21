@@ -10,18 +10,17 @@
 
 #include <torch/types.h>
 
-#include <ostream>
+#include <utility>
 
-namespace torch {
-namespace nn {
+namespace torch::nn {
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ TransformerEncoder
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 /// TransformerEncoder module.
 /// See
-/// https://pytorch.org/docs/master/generated/torch.nn.TransformerEncoder.html
-/// to learn abouut the exact behavior of this encoder layer module.
+/// https://pytorch.org/docs/main/generated/torch.nn.TransformerEncoder.html
+/// to learn about the exact behavior of this encoder layer module.
 ///
 /// See the documentation for `torch::nn::TransformerEncoder` class to learn
 /// what constructor arguments are supported for this encoder module.
@@ -33,7 +32,6 @@ namespace nn {
 /// encoder(TransformerEncoderOptions(encoderLayer,
 /// 6).norm(LayerNorm(LayerNormOptions({2}))));
 /// ```
-// NOLINTNEXTLINE(bugprone-exception-escape)
 class TORCH_API TransformerEncoderImpl
     : public Cloneable<TransformerEncoderImpl> {
  public:
@@ -41,7 +39,7 @@ class TORCH_API TransformerEncoderImpl
       TransformerEncoderLayer encoder_layer,
       int64_t num_layers)
       : TransformerEncoderImpl(
-            TransformerEncoderOptions(encoder_layer, num_layers)) {}
+            TransformerEncoderOptions(std::move(encoder_layer), num_layers)) {}
   explicit TransformerEncoderImpl(TransformerEncoderOptions options_);
 
   Tensor forward(
@@ -80,8 +78,8 @@ TORCH_MODULE(TransformerEncoder);
 
 /// TransformerDecoder is a stack of N decoder layers.
 /// See
-/// https://pytorch.org/docs/master/generated/torch.nn.TransformerDecoder.html
-/// to learn abouut the exact behavior of this decoder module
+/// https://pytorch.org/docs/main/generated/torch.nn.TransformerDecoder.html
+/// to learn about the exact behavior of this decoder module
 ///
 /// See the documentation for `torch::nn::TransformerDecoderOptions` class to
 /// learn what constructor arguments are supported for this decoder module
@@ -95,7 +93,6 @@ TORCH_MODULE(TransformerEncoder);
 /// torch::rand({10, 32, 512}); const auto tgt = torch::rand({20, 32, 512});
 /// auto out = transformer_decoder(tgt, memory);
 /// ```
-// NOLINTNEXTLINE(bugprone-exception-escape)
 class TORCH_API TransformerDecoderImpl
     : public Cloneable<TransformerDecoderImpl> {
  public:
@@ -103,7 +100,7 @@ class TORCH_API TransformerDecoderImpl
       TransformerDecoderLayer decoder_layer,
       int64_t num_layers)
       : TransformerDecoderImpl(
-            TransformerDecoderOptions(decoder_layer, num_layers)) {}
+            TransformerDecoderOptions(std::move(decoder_layer), num_layers)) {}
   explicit TransformerDecoderImpl(TransformerDecoderOptions options_);
 
   void reset() override;
@@ -152,5 +149,4 @@ class TORCH_API TransformerDecoderImpl
 /// module storage semantics.
 TORCH_MODULE(TransformerDecoder);
 
-} // namespace nn
-} // namespace torch
+} // namespace torch::nn

@@ -1,14 +1,8 @@
 #pragma once
 
 #include <ATen/DimVector.h>
-#include <ATen/core/Dimname.h>
 #include <c10/core/TensorOptions.h>
 #include <c10/util/strides.h>
-
-C10_CLANG_DIAGNOSTIC_PUSH()
-#if C10_CLANG_HAS_WARNING("-Wdeprecated-copy-dtor")
-C10_CLANG_DIAGNOSTIC_IGNORE("-Wdeprecated-copy-dtor")
-#endif
 
 namespace at {
 
@@ -69,6 +63,11 @@ namespace impl {
 //
 // A notable subclass of this interface is TensorIteratorBase.
 struct TORCH_API MetaBase {
+  MetaBase() = default;
+  MetaBase(const MetaBase&) = default;
+  MetaBase& operator=(const MetaBase&) = default;
+  MetaBase(MetaBase&&) noexcept = default;
+  MetaBase& operator=(MetaBase&&) noexcept = default;
   virtual const Tensor& maybe_get_output(int64_t output_idx) = 0;
 
   // Note: [set_output_*]
@@ -93,11 +92,10 @@ struct TORCH_API MetaBase {
   // output. If `strides` does not match the given output strides, proxy outputs
   // will be created and passed to the IMPL function.
   virtual void set_output_strided(
-      int64_t output_idx,
-      IntArrayRef sizes,
-      IntArrayRef strides,
-      TensorOptions options,
-      DimnameList names = {}) {
+      int64_t output_idx [[maybe_unused]],
+      IntArrayRef sizes [[maybe_unused]],
+      IntArrayRef strides [[maybe_unused]],
+      TensorOptions options [[maybe_unused]]) {
     TORCH_INTERNAL_ASSERT(false, "set_output_strided not implemented.");
   }
 
@@ -105,11 +103,10 @@ struct TORCH_API MetaBase {
   // outputs. This function has the same behavior as the old `set_output`: it
   // will only re-stride if the given output was resized.
   virtual void set_output_raw_strided(
-      int64_t output_idx,
-      IntArrayRef sizes,
-      IntArrayRef strides_hint,
-      TensorOptions options,
-      DimnameList names = {}) {
+      int64_t output_idx [[maybe_unused]],
+      IntArrayRef sizes [[maybe_unused]],
+      IntArrayRef strides_hint [[maybe_unused]],
+      TensorOptions options [[maybe_unused]]) {
     TORCH_INTERNAL_ASSERT(false, "set_output_strided not implemented.");
   }
 
@@ -118,10 +115,9 @@ struct TORCH_API MetaBase {
   void set_output_contiguous(
       int64_t output_idx,
       IntArrayRef sizes,
-      TensorOptions options,
-      DimnameList names = {}) {
+      TensorOptions options) {
     auto strides = c10::contiguous_strides(sizes);
-    set_output_strided(output_idx, sizes, strides, options, names);
+    set_output_strided(output_idx, sizes, strides, options);
   }
 
   // Returns a reference to an undefined tensor if there is no presupplied
@@ -129,11 +125,9 @@ struct TORCH_API MetaBase {
   const Tensor& maybe_get_output() {
     return maybe_get_output(0);
   }
-  virtual ~MetaBase() {}
+  virtual ~MetaBase() = default;
 };
 
 } // namespace impl
 
 } // namespace at
-
-C10_CLANG_DIAGNOSTIC_POP()

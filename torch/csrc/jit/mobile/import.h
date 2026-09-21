@@ -7,10 +7,7 @@
 
 #include <caffe2/serialize/file_adapter.h>
 
-namespace torch {
-namespace jit {
-using caffe2::serialize::FileAdapter;
-using caffe2::serialize::IStreamAdapter;
+namespace torch::jit {
 using caffe2::serialize::ReadAdapterInterface;
 using ExtraFilesMap = std::unordered_map<std::string, std::string>;
 
@@ -22,37 +19,38 @@ constexpr const char* kArchiveNameVersion = "version";
 // into a mobile::Module object.
 TORCH_API mobile::Module _load_for_mobile(
     std::istream& in,
-    c10::optional<at::Device> device,
-    ExtraFilesMap& extra_files);
+    std::optional<at::Device> device,
+    ExtraFilesMap& extra_file,
+    uint64_t module_load_options = kDefaultMobileLoadOptions);
 
 TORCH_API mobile::Module _load_for_mobile(
     const std::string& filename,
-    c10::optional<at::Device> device,
+    std::optional<at::Device> device,
     ExtraFilesMap& extra_files);
 
 TORCH_API mobile::Module _load_for_mobile(
     std::unique_ptr<ReadAdapterInterface> rai,
-    c10::optional<c10::Device> device,
+    std::optional<c10::Device> device,
     ExtraFilesMap& extra_files,
     uint64_t module_load_options = kDefaultMobileLoadOptions);
 
 TORCH_API mobile::Module _load_for_mobile(
     const std::string& filename,
-    c10::optional<at::Device> device,
+    std::optional<at::Device> device,
     ExtraFilesMap& extra_files,
     uint64_t module_load_options);
 
 TORCH_API mobile::Module _load_for_mobile(
     std::istream& in,
-    c10::optional<at::Device> device = c10::nullopt);
+    std::optional<at::Device> device = std::nullopt);
 
 TORCH_API mobile::Module _load_for_mobile(
     const std::string& filename,
-    c10::optional<at::Device> device = c10::nullopt);
+    std::optional<at::Device> device = std::nullopt);
 
 TORCH_API mobile::Module _load_for_mobile(
     std::unique_ptr<ReadAdapterInterface> rai,
-    c10::optional<c10::Device> device = c10::nullopt);
+    std::optional<c10::Device> device = std::nullopt);
 
 /**
  * Load only the contents of the "extra/" files whose names are
@@ -68,7 +66,7 @@ TORCH_API mobile::Module _load_for_mobile(
  */
 void _load_extra_only_for_mobile(
     const std::string& filename,
-    c10::optional<at::Device> device,
+    std::optional<at::Device> device,
     ExtraFilesMap& extra_files);
 
 // Currently used by both mobile/import.cpp and model_compatibility.cpp.
@@ -76,10 +74,10 @@ void _load_extra_only_for_mobile(
 // version type_resolver and obj_loader.
 at::TypePtr resolveTypeNameMobile(
     const c10::QualifiedName& qn,
-    std::shared_ptr<CompilationUnit> compilation_unit);
+    const std::shared_ptr<CompilationUnit>& compilation_unit);
 c10::StrongTypePtr typeResolverMobile(
     const c10::QualifiedName& qn,
-    std::shared_ptr<CompilationUnit> compilation_unit);
+    const std::shared_ptr<CompilationUnit>& compilation_unit);
 c10::intrusive_ptr<c10::ivalue::Object> objLoaderMobile(
     const at::StrongTypePtr& type,
     const at::IValue& input,
@@ -95,7 +93,7 @@ namespace mobile {
 /**
  * Given a torch::jit::mobile::Module, return a set of operator names
  * (with overload name) that are used by any method in this mobile
- * Mobile. This method runs through the bytecode for all methods
+ * Module. This method runs through the bytecode for all methods
  * in the specified model (module), and extracts all the root
  * operator names. Root operators are operators that are called
  * directly by the model (as opposed to non-root operators, which
@@ -107,18 +105,4 @@ TORCH_API std::set<std::string> _export_operator_list(
 
 } // namespace mobile
 
-extern mobile::Module (*load_flatbuffer_bytes)(
-    std::shared_ptr<char>,
-    size_t size,
-    c10::optional<at::Device>,
-    ExtraFilesMap*);
-
-extern mobile::Module (*load_flatbuffer_bytes_no_object)(
-    std::shared_ptr<char>,
-    size_t size,
-    c10::optional<at::Device>);
-
-extern uint64_t (*get_flatbuffer_bytecode_version)(char* flatbuffer_content);
-
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

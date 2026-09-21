@@ -1,107 +1,41 @@
+# mypy: allow-untyped-defs
+from collections.abc import Generator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any
+
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import detach_variable
+from torch.utils.checkpoint import (
+    _checkpoint_without_reentrant_generator_impl,
+    _DEFAULT_DETERMINISM_MODE,
+)
 
-from contextlib import contextmanager
-from typing import Any, List, Optional, Tuple
-
-from .contract import contract
+from .contract import _State, contract
 
 
 @contextmanager
-def _no_hook(module: nn.Module):
+def _no_hook(module: nn.Module, user_ctx: AbstractContextManager | None = None):
     r"""
     Disable hooks installed by checkpoint to avoid unintentional recursion
     during backward recomputation.
     """
-    orig_enable_hook = checkpoint.state(module).enable_hook
-    checkpoint.state(module).enable_hook = False
-    try:
-        yield
-    except Exception:
-        raise
-    finally:
-        checkpoint.state(module).enable_hook = orig_enable_hook
+
+    with user_ctx if user_ctx else nullcontext():
+        orig_enable_hook = checkpoint.state(module).enable_hook
+        checkpoint.state(module).enable_hook = False
+        try:
+            yield
+        finally:
+            checkpoint.state(module).enable_hook = orig_enable_hook
 
 
-class _ModuleHookCheckpointFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, module: nn.Module, output: Any, *inputs: Any) -> Any:  # type: ignore[override]
-        ctx.module = module
-
-        # Save non-tensor inputs in ctx, keep a placeholder None for tensors
-        # to be filled out during the backward.
-        ctx.inputs = []
-        ctx.tensor_indices = []
-        tensor_inputs = []
-        for i, inp in enumerate(inputs):
-            if torch.is_tensor(inp):
-                tensor_inputs.append(inp)
-                ctx.tensor_indices.append(i)
-                ctx.inputs.append(None)
-            else:
-                ctx.inputs.append(inp)
-
-        ctx.save_for_backward(*tensor_inputs)
-
-        return output
-
-    @staticmethod
-    def backward(ctx, output_grads: Tuple[Optional[torch.Tensor]]) -> Any:  # type: ignore[override]
-        if not torch.autograd._is_checkpoint_valid():
-            raise RuntimeError(
-                "Checkpointing is not compatible with .grad() or when an "
-                "`inputs` parameter is passed to .backward(). Please use "
-                ".backward() and do not pass its `inputs` argument."
-            )
-
-        # Copy the list to avoid modifying original list.
-        inputs = list(ctx.inputs)
-        tensor_indices = ctx.tensor_indices
-        tensors = ctx.saved_tensors
-
-        # Fill in inputs with appropriate saved tensors.
-        for i, idx in enumerate(tensor_indices):
-            inputs[idx] = tensors[i]
-
-        detached_inputs = detach_variable(tuple(inputs))
-        with torch.enable_grad(), _no_hook(ctx.module):
-            outputs = ctx.module(*detached_inputs)
-
-        if isinstance(outputs, torch.Tensor):
-            outputs = (outputs,)
-
-        if isinstance(output_grads, torch.Tensor):
-            output_grads = (output_grads,)
-
-        # run backward() with only tensor that requires grad
-        outputs_requires_grad: List[torch.Tensor] = []
-        output_grad_tensors: List[torch.Tensor] = []
-        for i in range(len(outputs)):
-            if torch.is_tensor(outputs[i]) and outputs[i].requires_grad:
-                outputs_requires_grad.append(outputs[i])
-                assert (
-                    output_grads[i] is not None
-                ), f"expecting grad for output at index {i}, but got None."
-                output_grad_tensors.append(output_grads[i])  # type: ignore[arg-type]
-        if len(outputs_requires_grad) == 0:
-            raise RuntimeError(
-                "none of output has requires_grad=True,"
-                " this checkpoint() is not necessary"
-            )
-
-        torch.autograd.backward(outputs_requires_grad, output_grad_tensors)
-        grads = tuple(
-            inp.grad if isinstance(inp, torch.Tensor) else None
-            for inp in detached_inputs
-        )
-
-        # The two None is for forward argument module and output respectively.
-        return (None, None) + grads
+class _CheckpointState(_State):
+    enable_hook: bool = False
+    _ac_generator: Generator[None, None, None] | None
 
 
-@contract
-def checkpoint(module: nn.Module) -> nn.Module:
+@contract(_CheckpointState)
+def checkpoint(module: nn.Module, **kwargs) -> nn.Module:
     r"""
     This is a composable activation checkpointing API. Unlike functional
     activation checkpointing APIs, this one does not require changing model
@@ -116,10 +50,11 @@ def checkpoint(module: nn.Module) -> nn.Module:
             checkpointing.
 
     Example::
+        >>> # xdoctest: +SKIP
         >>> import torch.nn as nn
         >>>
         >>> class MyModel(nn.Module):
-        >>>     def __init__(self):
+        >>>     def __init__(self) -> None:
         >>>         super().__init__()
         >>>         self.l1 = nn.Linear(10, 10)
         >>>         self.l2 = nn.Linear(10, 10)
@@ -132,26 +67,69 @@ def checkpoint(module: nn.Module) -> nn.Module:
         >>> model(torch.zeros(2, 10)).sum().backward()
 
     """
+    torch._C._log_api_usage_once("torch.distributed.checkpoint")
 
-    def forward_pre_hook(module: nn.Module, inputs: Tuple[Any]) -> None:
+    use_reentrant = kwargs.pop("use_reentrant", False)
+    if use_reentrant:
+        raise NotImplementedError(
+            "use_reentrant=True is not supported in composable checkpoint. "
+            "Please use torch.utils.checkpoint.checkpoint instead."
+        )
+    preserve_rng_state = kwargs.pop("preserve_rng_state", True)
+    user_context_fns = kwargs.pop("context_fn", None)
+    determinism_check = kwargs.pop("determinism_check", _DEFAULT_DETERMINISM_MODE)
+    debug = kwargs.pop("debug", False)
+    early_stop = kwargs.pop("early_stop", True)
+
+    if kwargs:
+        raise ValueError(
+            "Unexpected keyword arguments: " + ",".join(arg for arg in kwargs)
+        )
+
+    def forward_pre_hook(
+        module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> None:
         if checkpoint.state(module).enable_hook:
-            checkpoint.state(module).orig_grad_enabled = torch.is_grad_enabled()
-            torch.set_grad_enabled(False)
 
-    def forward_hook(module: nn.Module, inputs: Tuple[Any], output: Any) -> Any:
+            def context_fns():
+                if user_context_fns is not None:
+                    ctx1, ctx2 = user_context_fns()
+                    return ctx1, _no_hook(module, ctx2)
+                else:
+                    return nullcontext(), _no_hook(module)
+
+            gen = _checkpoint_without_reentrant_generator_impl(
+                module,
+                args,
+                kwargs,
+                preserve_rng_state=preserve_rng_state,
+                context_fn=context_fns,
+                determinism_check=determinism_check,
+                debug=debug,
+                early_stop=early_stop,
+            )
+            checkpoint.state(module)._ac_generator = gen
+            next(gen)
+
+    def forward_hook(module: nn.Module, inputs: tuple[Any, ...], output: Any) -> Any:
         if checkpoint.state(module).enable_hook:
-            torch.set_grad_enabled(checkpoint.state(module).orig_grad_enabled)
-            return _ModuleHookCheckpointFunction.apply(module, output, *inputs)
-        else:
-            return output
+            try:
+                gen = checkpoint.state(module)._ac_generator
+                if gen is None:
+                    raise AssertionError
+                next(gen)
+            except StopIteration:
+                pass
+            else:
+                raise RuntimeError(
+                    "Expected non-reentrant activation checkpoint generator to be exhausted, but it was not!"
+                )
 
-    # This hook does the following things:
-    # 1. detach outputs from the autograd graph to discard activations
-    # 2. insert an autograd.Function after the forward pass to recompute
-    #    activations during the backward pass.
+        #  Ensure that we no longer hold on to the generator. always_call=True helps ensure we
+        # clear this even in the case of exception in fwd pass.
+        checkpoint.state(module)._ac_generator = None
+
     checkpoint.state(module).enable_hook = True
-    module.register_forward_pre_hook(forward_pre_hook)
-    # Use prepend to make sure we restore the original grad enabled state right
-    # after the module forward invocation.
-    module.register_forward_hook(forward_hook, prepend=True)
+    module.register_forward_pre_hook(forward_pre_hook, with_kwargs=True)
+    module.register_forward_hook(forward_hook, prepend=True, always_call=True)
     return module

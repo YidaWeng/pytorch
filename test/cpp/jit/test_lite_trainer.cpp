@@ -1,3 +1,5 @@
+#include <test/cpp/jit/test_utils.h>
+
 #include <gtest/gtest.h>
 
 #include <c10/core/TensorOptions.h>
@@ -10,7 +12,6 @@
 #include <torch/csrc/jit/mobile/train/optim/sgd.h>
 #include <torch/csrc/jit/mobile/train/random.h>
 #include <torch/csrc/jit/mobile/train/sequential.h>
-#include <torch/csrc/jit/serialization/flatbuffer_serializer_jit.h>
 #include <torch/csrc/jit/serialization/import.h>
 #include <torch/data/dataloader.h>
 #include <torch/torch.h>
@@ -77,7 +78,7 @@ TEST(LiteTrainerTest, Params) {
   AT_ASSERT(parameters[0].item<float>() == bc_parameters[0].item<float>());
 }
 
-// TODO Renable these tests after parameters are correctly loaded on mobile
+// TODO Re-enable these tests after parameters are correctly loaded on mobile
 /*
 TEST(MobileTest, NamedParameters) {
   Module m("m");
@@ -170,12 +171,11 @@ TEST(MobileTest, SaveParametersDefaultsToZip) {
   EXPECT_EQ(ss_data.str()[0], 'P');
   EXPECT_EQ(ss_data.str()[1], 'K');
   EXPECT_EQ(ss_data.str()[2], '\x03');
-  EXPECT_EQ(ss_data.str()[3], '\x04');
+  EXPECT_EQ(std::move(ss_data).str()[3], '\x04');
 }
 
 TEST(MobileTest, SaveParametersCanUseFlatbuffer) {
   // Save some empty parameters using flatbuffer.
-  register_flatbuffer_all();
   std::map<std::string, at::Tensor> empty_parameters;
   std::stringstream ss_data;
   _save_parameters(empty_parameters, ss_data, /*use_flatbuffer=*/true);
@@ -187,12 +187,11 @@ TEST(MobileTest, SaveParametersCanUseFlatbuffer) {
   EXPECT_EQ(ss_data.str()[4], 'P');
   EXPECT_EQ(ss_data.str()[5], 'T');
   EXPECT_EQ(ss_data.str()[6], 'M');
-  EXPECT_EQ(ss_data.str()[7], 'F');
+  EXPECT_EQ(std::move(ss_data).str()[7], 'F');
 }
 
 TEST(MobileTest, SaveLoadParametersUsingFlatbuffers) {
   // Create some simple parameters to save.
-  register_flatbuffer_all();
   std::map<std::string, at::Tensor> input_params;
   input_params["four_by_ones"] = 4 * torch::ones({});
   input_params["three_by_ones"] = 3 * torch::ones({});
@@ -239,6 +238,17 @@ TEST(MobileTest, LoadParametersEmptyDataShouldThrow) {
   // Loading parameters from an empty data stream should throw an exception.
   std::stringstream empty;
   EXPECT_ANY_THROW(_load_parameters(empty));
+}
+
+TEST(MobileTest, LoadParametersMalformedFlatbuffer) {
+  // Manually create some data with Flatbuffer header.
+  std::stringstream bad_data;
+  bad_data << "PK\x03\x04PTMF\x00\x00"
+           << "*}NV\xb3\xfa\xdf\x00pa";
+
+  // Loading parameters from it should throw an exception.
+  ASSERT_THROWS_WITH_MESSAGE(
+      _load_parameters(bad_data), "Malformed Flatbuffer module");
 }
 
 TEST(LiteTrainerTest, SGD) {
@@ -307,7 +317,7 @@ struct DummyDataset : torch::data::datasets::Dataset<DummyDataset, int> {
     // NOLINTNEXTLINE(bugprone-narrowing-conversions,cppcoreguidelines-narrowing-conversions)
     return 1 + index;
   }
-  torch::optional<size_t> size() const override {
+  std::optional<size_t> size() const override {
     return size_;
   }
 

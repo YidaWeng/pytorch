@@ -1,4 +1,3 @@
-#include <ATen/Utils.h>
 #include <c10/core/ScalarType.h>
 #include <c10/util/Exception.h>
 #include <c10/util/accumulate.h>
@@ -11,7 +10,6 @@
 #include <torch/csrc/jit/passes/fold_conv_bn.h>
 #include <torch/csrc/jit/passes/frozen_conv_folding.h>
 #include <torch/csrc/jit/passes/utils/optimization_utils.h>
-#include <torch/csrc/jit/tensorexpr/types.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -21,8 +19,7 @@
 #include <ATen/ops/zeros_like.h>
 #endif
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 
@@ -37,7 +34,7 @@ bool supportedConvNode(Node* n) {
     case aten::_convolution: {
       auto transposed_conv =
           constant_as<bool>(n->namedInput("transposed")).value_or(true);
-      // dont handle transposed conv yet or not-constant transpose parameter
+      // don't handle transposed conv yet or not-constant transpose parameter
       return !transposed_conv;
     }
     default:
@@ -66,7 +63,7 @@ bool FoldFrozenConvBatchnorm(Block* b) {
       auto bn_rm_ivalue = bn->namedInput("running_mean");
       auto bn_rv_ivalue = bn->namedInput("running_var");
       // check running_mean and running_var has value, if they are
-      // None(track_running_stats=False), skiping the folding path.
+      // None(track_running_stats=False), skipping the folding path.
       if (bn_rm_ivalue->type() == NoneType::get() &&
           bn_rv_ivalue->type() == NoneType::get()) {
         continue;
@@ -109,13 +106,13 @@ bool FoldFrozenConvBatchnorm(Block* b) {
       }
 
       ConvBNParameters params;
-      params.conv_w = conv_w;
-      params.conv_b = conv_b;
-      params.bn_rm = bn_rm;
-      params.bn_rv = bn_rv;
+      params.conv_w = std::move(conv_w);
+      params.conv_b = std::move(conv_b);
+      params.bn_rm = std::move(bn_rm);
+      params.bn_rv = std::move(bn_rv);
       params.bn_eps = bn_eps;
-      params.bn_w = bn_w;
-      params.bn_b = bn_b;
+      params.bn_w = std::move(bn_w);
+      params.bn_b = std::move(bn_b);
       std::tuple<Tensor, Tensor> out = computeUpdatedConvWeightAndBias(params);
       WithInsertPoint guard(conv);
       auto fused_conv_w = b->owningGraph()->insertConstant(std::get<0>(out));
@@ -191,7 +188,7 @@ bool checkConvAndBroadcastingOpPreConditions(Node* conv, Node* op) {
       constant_as<Tensor>(conv->namedInput("weight")).value();
 
   // avoid fusing op that causes type promotion
-  // resticting to float avoids int/float difficulties with scalar overload
+  // restricting to float avoids int/float difficulties with scalar overload
   if (!weight_tensor.is_floating_point()) {
     return false;
   }
@@ -326,10 +323,10 @@ bool FoldFrozenConvMulOrDiv(Block* b) {
 
       // We've already verified that the second input has numel == 1 or
       // channels-out resize it to the shape that will broadcast to
-      // weight_tensor when the op is run so we dont change weight size
+      // weight_tensor when the op is run so we don't change weight size
       std::vector<int64_t> weight_compatible_size = {out_channels};
-      for (const auto i : c10::irange(1, weight_tensor.ndimension())) {
-        (void)i; // Suppress unused variable warning
+      for ([[maybe_unused]] const auto i :
+           c10::irange(1, weight_tensor.ndimension())) {
         weight_compatible_size.push_back(1);
       }
 
@@ -408,5 +405,4 @@ bool FoldFrozenConvMulOrDiv(std::shared_ptr<Graph>& graph) {
   return graph_modified;
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

@@ -3,18 +3,17 @@
 #include <ATen/native/DispatchStub.h>
 #include <ATen/native/quantized/IndexKernel.h>
 #include <ATen/native/TensorAdvancedIndexingUtils.h>
-#include <ATen/NamedTensorUtils.h>
 #include <c10/core/QScheme.h>
 #include <ATen/native/TensorAdvancedIndexing.h>
 
-namespace at {
-namespace native {
+
+namespace at::native {
 DEFINE_DISPATCH(masked_fill_kernel_quantized_stub);
 DEFINE_DISPATCH(index_put_kernel_quantized_stub);
 DEFINE_DISPATCH(index_put_with_sort_quantized_stub);
 
 namespace {
-static TensorIterator make_index_put_iterator(const AdvancedIndex& info, const Tensor& value) {
+TensorIterator make_index_put_iterator(const AdvancedIndex& info, const Tensor& value) {
   TORCH_CHECK(is_expandable_to(value.sizes(), info.src.sizes()), "shape mismatch: value tensor of shape ", value.sizes(),
              " cannot be broadcast to indexing result of shape ", info.src.sizes());
   TensorIteratorConfig config;
@@ -30,12 +29,9 @@ static TensorIterator make_index_put_iterator(const AdvancedIndex& info, const T
   return config.build();
 }
 
-static Tensor & masked_fill_impl_quantized_cpu(Tensor & self, const Tensor & mask, const Scalar& value) {
-  NoNamesGuard guard;
-  if (mask.dtype() == ScalarType::Byte) {
-    TORCH_WARN("masked_fill_ received a mask with dtype torch.uint8, this behavior is now deprecated," \
-            "please use a mask with dtype torch.bool instead.");
-  }
+Tensor & masked_fill_impl_quantized_cpu(Tensor & self, const Tensor & mask, const Scalar& value) {
+  TORCH_CHECK(mask.dtype() == ScalarType::Bool, "masked_fill only supports boolean masks, "
+    "but got dtype ", mask.dtype());
 
   if (at::has_internal_overlap(self) == MemOverlap::Yes) {
     TORCH_WARN(
@@ -60,32 +56,27 @@ static Tensor & masked_fill_impl_quantized_cpu(Tensor & self, const Tensor & mas
 
 Tensor & masked_fill__quantized_cpu(Tensor& self, const Tensor & mask, const Scalar& value) {
   TORCH_CHECK(self.qscheme() == c10::kPerTensorAffine, "masked_fill__quantized_cpu for quantized tensors is currently only supported for per tensor quantized tensors");
-  auto maybe_outnames = namedinference::broadcast_to_outnames(self, mask, "masked_fill_");
 
   masked_fill_impl_quantized_cpu(self, mask, value);
-  namedinference::propagate_names_if_nonempty(self, maybe_outnames);
   return self;
 }
 
 Tensor & masked_fill__quantized_cpu(Tensor& self, const Tensor & mask, const Tensor & value) {
   TORCH_CHECK(self.qscheme() == c10::kPerTensorAffine, "masked_fill__quantized_cpu for quantized tensors is currently only supported for per tensor quantized tensors");
-  auto maybe_outnames = namedinference::broadcast_to_outnames(self, mask, "masked_fill_");
   TORCH_CHECK(value.dim() == 0, "masked_fill_ only supports a 0-dimensional value tensor, but got tensor "
       "with ", value.dim(), " dimension(s).");
 
   masked_fill_impl_quantized_cpu(self, mask, value.item());
-  namedinference::propagate_names_if_nonempty(self, maybe_outnames);
   return self;
 }
 
-Tensor & masked_fill_impl_quantized_cuda(Tensor& self, const Tensor & mask, const Scalar& value) {
+static Tensor & masked_fill_impl_quantized_cuda(Tensor& self, const Tensor & mask, const Scalar& value) {
   TORCH_CHECK(self.device() == mask.device(), "expected self and mask to be on the same device, but got mask on ",
     mask.device(), " and self on ", self.device());
-  TORCH_CHECK(mask.scalar_type() == kByte || mask.scalar_type() == kBool,
-    "expected mask dtype to be Bool but got ", mask.scalar_type());
+  TORCH_CHECK(mask.scalar_type() == kBool, "masked_fill only supports boolean masks, "
+    "but got dtype ", mask.scalar_type());
   TORCH_CHECK(self.qscheme() == c10::kPerTensorAffine, "masked_fill__quantized_cpu for quantized tensors is currently only supported for per tensor quantized tensors");
 
-  auto maybe_outnames = namedinference::broadcast_to_outnames(self, mask, "masked_fill_");
 
   if (at::has_internal_overlap(self) == MemOverlap::Yes) {
     TORCH_WARN(
@@ -107,7 +98,6 @@ Tensor & masked_fill_impl_quantized_cuda(Tensor& self, const Tensor & mask, cons
       .build();
 
   masked_fill_kernel_quantized_stub(iter.device_type(), iter, value, self.q_scale(), self.q_zero_point());
-  namedinference::propagate_names_if_nonempty(self, maybe_outnames);
   return self;
 }
 
@@ -123,7 +113,7 @@ Tensor & masked_fill__quantized_cuda(Tensor& self, const Tensor & mask, const Te
   return masked_fill_impl_quantized_cuda(self, mask, value.item());
 }
 
-Tensor& _index_put_impl_quantized_cpu_(Tensor & self, const torch::List<c10::optional<Tensor>>& indices, const Tensor & value, const bool accumulate, const bool unsafe) {
+Tensor& _index_put_impl_quantized_cpu_(Tensor & self, const torch::List<std::optional<Tensor>>& indices, const Tensor & value, const bool accumulate, const bool unsafe) {
   TORCH_CHECK_INDEX(indices.size() <= (size_t)self.dim(), "too many indices for tensor of dimension ", self.dim(), " (got ", indices.size(), ")");
   TORCH_CHECK(!value.is_quantized(), "Value argument for quantized input_put should not be quantized");
   TORCH_CHECK(self.qscheme() == c10::kPerTensorAffine, "index_put for quantized tensors is currently only supported for per tensor quantized tensors");
@@ -146,8 +136,7 @@ Tensor& _index_put_impl_quantized_cpu_(Tensor & self, const torch::List<c10::opt
     value_ = value.to(self.device());
   }
   at::assert_no_overlap(self, value);
-  // NOLINTNEXTLINE(performance-implicit-conversion-in-loop)
-  for (const c10::optional<Tensor>& index: indices) {
+  for (const std::optional<Tensor>& index: indices) {
     if (index.has_value()) {
       at::assert_no_overlap(self, *index);
     }
@@ -159,7 +148,7 @@ Tensor& _index_put_impl_quantized_cpu_(Tensor & self, const torch::List<c10::opt
   return self;
 }
 
-Tensor& _index_put_impl_quantized_cuda_(Tensor & self, const torch::List<c10::optional<Tensor>>& indices, const Tensor & value, const bool accumulate, const bool unsafe) {
+Tensor& _index_put_impl_quantized_cuda_(Tensor & self, const torch::List<std::optional<Tensor>>& indices, const Tensor & value, const bool accumulate, const bool unsafe) {
   TORCH_CHECK_INDEX(indices.size() <= (size_t)self.dim(), "too many indices for tensor of dimension ", self.dim(), " (got ", indices.size(), ")");
   TORCH_CHECK(!value.is_quantized(), "Value argument for quantized input_put should not be quantized");
   TORCH_CHECK(self.qscheme() == c10::kPerTensorAffine, "index_put for quantized tensors is currently only supported for per tensor quantized tensors");
@@ -185,7 +174,7 @@ Tensor& _index_put_impl_quantized_cuda_(Tensor & self, const torch::List<c10::op
 
   at::assert_no_overlap(self, value);
   // NOLINTNEXTLINE(performance-implicit-conversion-in-loop)
-  for (const c10::optional<Tensor>& index: indices) {
+  for (const std::optional<Tensor>& index: indices) {
     if (index.has_value()) {
       at::assert_no_overlap(self, *index);
     }
@@ -203,5 +192,4 @@ Tensor& _index_put_impl_quantized_cuda_(Tensor & self, const torch::List<c10::op
   return self;
 }
 
-}
 }

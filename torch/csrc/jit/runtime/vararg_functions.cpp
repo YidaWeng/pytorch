@@ -5,8 +5,7 @@
 #include <ATen/core/class_type.h>
 #include <c10/util/irange.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 static constexpr int defaultPrecision = 6;
@@ -18,7 +17,7 @@ void addFormattedArg(
     const IValue& ival,
     std::stringstream& ss,
     int precision = defaultPrecision) {
-  // TODO: Implement precison-based formatting
+  // TODO: Implement precision-based formatting
   std::stringstream tmp;
   switch (key) {
     case 'd':
@@ -68,7 +67,7 @@ void addFormattedArg(
       } else {
         tmp << static_cast<float>(ival.toDouble());
       }
-      ss << tmp.str();
+      ss << std::move(tmp).str();
       break;
     case 'c':
       TORCH_CHECK(
@@ -107,9 +106,14 @@ void tupleUnpack(Stack& stack) {
 }
 
 void format(Stack& stack, size_t num_inputs) {
+  TORCH_CHECK(
+      num_inputs > 0 && num_inputs <= stack.size(),
+      "Invalid number of inputs for format string: ",
+      num_inputs);
+
   // static const std::regex unsupported_options("\\{(.*?)\\}");
   auto format = peek(stack, 0, num_inputs).toStringRef();
-  // // Temporally comment out the warning message because of
+  // // Temporarily comment out the warning message because of
   // // "StdRegexIsAwful" internal Lint error, to prevent sev
   // // of std::regex from PT mobile.
   // if (std::regex_search(format, unsupported_options)) {
@@ -126,14 +130,14 @@ void format(Stack& stack, size_t num_inputs) {
     }
     ss << format.substr(begin, loc - begin);
     if (used_args >= args.size()) {
-      AT_ERROR("Too few arguments for format string: ", format);
+      TORCH_CHECK(false, "Too few arguments for format string: ", format);
     }
     ss << args[used_args];
     begin = loc + 2;
   }
 
   drop(stack, num_inputs);
-  push(stack, ss.str());
+  push(stack, std::move(ss).str());
 }
 
 void einsum(Stack& stack, size_t num_inputs) {
@@ -195,7 +199,7 @@ void einsum(Stack& stack, size_t num_inputs) {
     parse_sublist(args.back().toIntList(), num_inputs - 1);
   }
 
-  const auto equation = ss.str();
+  const auto equation = std::move(ss).str();
   std::vector<at::Tensor> operands;
 
   // Parse input operands
@@ -217,7 +221,7 @@ void einsum(Stack& stack, size_t num_inputs) {
 void percentFormat(Stack& stack, size_t num_inputs) {
   auto format_str = peek(stack, 0, num_inputs).toStringRef();
   auto args = last(stack, num_inputs - 1)[0];
-  auto args_size = 1; // assumed size
+  size_t args_size = 1; // assumed size
   if (args.isTuple()) {
     args_size = args.toTupleRef().elements().size();
   }
@@ -239,7 +243,6 @@ void percentFormat(Stack& stack, size_t num_inputs) {
       begin = percent_idx + 2; // skip the `%` and the format specifier
       continue;
     }
-    // NOLINTNEXTLINE(clang-diagnostic-sign-compare)
     TORCH_CHECK(used_args < args_size, "Too few arguments for format string");
     char key = format_str.at(format_idx);
     IValue arg;
@@ -252,10 +255,9 @@ void percentFormat(Stack& stack, size_t num_inputs) {
     begin = percent_idx + 2;
     ++used_args;
   }
-  // NOLINTNEXTLINE(clang-diagnostic-sign-compare)
   TORCH_CHECK(used_args == args_size, "Too many arguments for format string");
   drop(stack, num_inputs);
-  push(stack, ss.str());
+  push(stack, std::move(ss).str());
 }
 
 void listUnpack(Stack& stack, size_t num_outputs) {
@@ -270,9 +272,12 @@ void listUnpack(Stack& stack, size_t num_outputs) {
 }
 
 void tupleConstruct(Stack& stack, size_t num_inputs) {
+  if (num_inputs > stack.size()) {
+    TORCH_CHECK(false, "Invalid number of inputs: ", num_inputs);
+  }
   switch (num_inputs) {
     case 0:
-      stack.push_back(c10::ivalue::Tuple::create());
+      stack.emplace_back(c10::ivalue::Tuple::create());
       break;
     case 1:
       stack.back() = c10::ivalue::Tuple::create(std::move(stack.back()));
@@ -310,10 +315,7 @@ void namedTupleConstruct(
     Stack& stack,
     c10::TypePtr tuple_type,
     size_t num_inputs) {
-  std::vector<IValue> elems{
-      std::make_move_iterator(stack.end() - num_inputs),
-      std::make_move_iterator(stack.end())};
-  drop(stack, num_inputs);
+  auto elems = pop(stack, num_inputs);
   push(
       stack,
       c10::ivalue::Tuple::createNamed(std::move(elems), std::move(tuple_type)));
@@ -336,7 +338,7 @@ void listConstruct(
         drop(stack, num_inputs);
         return vals;
       };
-  stack.push_back(makeList(stack, list_type, num_inputs));
+  stack.emplace_back(makeList(stack, list_type, num_inputs));
 }
 
 void dictConstruct(
@@ -426,5 +428,4 @@ void dequantize(Stack& stack) {
   }
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

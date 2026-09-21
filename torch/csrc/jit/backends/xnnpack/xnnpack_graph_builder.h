@@ -1,4 +1,8 @@
-// (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+//
+// This source code is licensed under the BSD-style license found in the
+// LICENSE file in the root directory of this source tree.
+
 #include <ATen/Functions.h>
 #include <ATen/Utils.h>
 #include <torch/torch.h>
@@ -32,7 +36,7 @@ class XNNGraph {
   std::vector<torch::jit::Value*> _outputs;
 
   // Graph passes for optimizing and tracing torchscript graph
-  // Essentially massaging the graph into a digestiable format for
+  // Essentially massaging the graph into a digestible format for
   // xnnpack graph lowering.
   std::shared_ptr<torch::jit::Graph> optimizeAndTraceGraph(
       std::shared_ptr<torch::jit::Graph> graph,

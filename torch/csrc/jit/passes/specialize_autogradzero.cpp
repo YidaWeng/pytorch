@@ -3,25 +3,23 @@
 #include <c10/util/Exception.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/jit_log.h>
-#include <torch/csrc/jit/passes/clear_undefinedness.h>
 #include <torch/csrc/jit/runtime/graph_executor.h>
 #include <torch/csrc/jit/runtime/profiling_record.h>
 
 #include <ATen/core/symbol.h>
 #include <c10/util/irange.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 static const auto countsAttribute = Symbol::attr("none_counts");
 
-bool hasGradSumToSizeUses(Value* v) {
+static bool hasGradSumToSizeUses(Value* v) {
   return std::any_of(v->uses().begin(), v->uses().end(), [](const Use& use) {
     return use.user->kind() == aten::_grad_sum_to_size;
   });
 }
 
-void insertProfileNodesForSpecializeAutogradZero(
+static void insertProfileNodesForSpecializeAutogradZero(
     Block* block,
     ProfilingRecord* pr) {
   for (auto it = block->nodes().begin(); it != block->nodes().end(); ++it) {
@@ -240,7 +238,7 @@ struct AutogradZeroSpecializer {
         continue;
       }
 
-      if (inp->uses().size() == 0 || !inp->type()->cast<TensorType>()) {
+      if (inp->uses().empty() || !inp->type()->cast<TensorType>()) {
         continue;
       }
 
@@ -265,7 +263,7 @@ struct AutogradZeroSpecializer {
     }
     GRAPH_DUMP("After for loop", graph_);
     // unable to specialize any of the inputs
-    if (nonzero_values.size() == 0 && zero_values.size() == 0) {
+    if (nonzero_values.empty() && zero_values.empty()) {
       GRAPH_DUMP("Unable to add any specialization guards", graph_);
       versioning_if->destroy();
       // the checks we inserted will be cleaned up
@@ -302,8 +300,8 @@ struct AutogradZeroSpecializer {
     }
 
     // We've created:
-    // succesful_checks = Guards(...)
-    // if (succesful_checks)
+    // successful_checks = Guards(...)
+    // if (successful_checks)
     // -> optimized graph
     // else:
     // -> fallback graph
@@ -363,12 +361,12 @@ struct AutogradZeroSpecializer {
           state_[n->output()] = State::Zero;
         } break;
         case prim::profile: {
-          // this a profile node on a tensor use
+          // this is a profile node on a tensor use
           // if we decided to specialize this graph
           // its input may have undefinedness info
           // otherwise it should be Unknown
-          if (n->inputs().size() > 0) {
-            state_[n->output()] = !state_.count(n->input())
+          if (!n->inputs().empty()) {
+            state_[n->output()] = !state_.contains(n->input())
                 ? State::Unknown
                 : state_[n->output()] = state_[n->input()];
           }
@@ -446,12 +444,12 @@ struct AutogradZeroSpecializer {
     for (auto it = b->nodes().begin(); it != b->nodes().end(); ++it) {
       Node* n = *it;
       if (n->kind() == aten::_grad_sum_to_size) {
-        bool profiled_none_flag = profiled_none_.count(n->input(1));
+        bool profiled_none_flag = profiled_none_.contains(n->input(1));
         const Node* node = n->input(1)->node();
         // propagate profiled none through other profile_ivalue nodes;
         while (!profiled_none_flag && node->kind() == prim::profile_ivalue) {
           profiled_none_flag =
-              profiled_none_flag || profiled_none_.count(node->input(0));
+              profiled_none_flag || profiled_none_.contains(node->input(0));
           node = node->input(0)->node();
         }
         if (n->input(1)->mustBeNone() || profiled_none_flag) {
@@ -478,5 +476,4 @@ void specializeAutogradZero(std::shared_ptr<Graph> g) {
   azs.run();
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

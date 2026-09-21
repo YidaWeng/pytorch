@@ -7,12 +7,11 @@
 #include <torch/csrc/lazy/core/ir.h>
 #include <torch/csrc/lazy/core/util.h>
 
-namespace torch {
-namespace lazy {
+namespace torch::lazy {
 
 class TORCH_API SymNodeImpl : public c10::SymNodeImpl {
  public:
-  SymNodeImpl(NodePtr ptr) : node_(std::move(ptr)){};
+  SymNodeImpl(NodePtr ptr) : node_(std::move(ptr)) {}
   NodePtr node_;
 };
 
@@ -37,13 +36,24 @@ class TORCH_API LazyTensor : public c10::intrusive_ptr_target {
         : tensor_data(std::move(tensor_data)),
           device(std::move(device)),
           unique_id(GetNextTensorId()) {}
+    // TODO(alanwaketan): Remove this ctor. This is a
+    // temporary ctor to ease XLA LTC migration. It depends on
+    // XLA's Functionalization integration.
+    Data(BackendDevice device)
+        : device(std::move(device)), unique_id(GetNextTensorId()) {}
 
-    ~Data();
+    Data(Data&& other) = delete;
+    Data(const Data&) = delete;
+    Data& operator=(const Data&) = delete;
+    Data& operator=(Data&&) = delete;
+    virtual ~Data();
 
     BackendDataPtr handle;
     Value ir_value;
-    c10::optional<at::Tensor> tensor_data;
+    std::optional<at::Tensor> tensor_data;
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     const BackendDevice device;
+    // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
     const int64_t unique_id = 0;
     size_t generation = 1;
   };
@@ -52,7 +62,7 @@ class TORCH_API LazyTensor : public c10::intrusive_ptr_target {
       const at::Tensor& tensor,
       const BackendDevice& device);
   static LazyTensorPtr Create(Value ir_value, const BackendDevice& device);
-  static LazyTensorPtr Create(BackendDataPtr handle);
+  static LazyTensorPtr Create(const BackendDataPtr& handle);
   static LazyTensorPtr Create(std::shared_ptr<Data> data);
 
   // The default ctor previously created a null LazyTensor (one with no 'data'
@@ -62,27 +72,36 @@ class TORCH_API LazyTensor : public c10::intrusive_ptr_target {
   // used to rely on a LazyTensor obj with a null Data can now rely on a null
   // LazyTensorPtr instead.
   LazyTensor() = delete;
+  LazyTensor(const LazyTensor&) = default;
+  LazyTensor(LazyTensor&&) noexcept = default;
+  LazyTensor& operator=(const LazyTensor&) = default;
+  LazyTensor& operator=(LazyTensor&&) noexcept = default;
+
+  ~LazyTensor() override = default;
 
   size_t generation() const {
     return data()->generation;
   }
 
-  int64_t size(int64_t dim) const;
+  // Override it to use your own Shape.
+  virtual int64_t size(int64_t dim) const;
 
-  at::Tensor ToTensor(bool detached);
+  // Override it to use your own graph executor.
+  virtual at::Tensor ToTensor(bool detached);
 
-  void ShallowCopyTo(LazyTensorPtr dest) const;
+  void ShallowCopyTo(const LazyTensorPtr& dest) const;
 
   // Assigns the tensor value to the lazy tensor.
   void SetTensor(at::Tensor tensor);
 
-  void UpdateFromTensor(at::Tensor tensor, bool sync);
-  void UpdateFromTensorOut(at::Tensor tensor);
+  void UpdateFromTensor(const at::Tensor& tensor, bool sync);
+  void UpdateFromTensorOut(const at::Tensor& tensor);
   void UpdateFromTensorOut(const LazyTensorPtr& tensor);
 
-  Data* data() const;
+  const std::shared_ptr<Data>& data() const;
 
-  at::ScalarType dtype() const;
+  // Override it to use your own type conversion.
+  virtual at::ScalarType dtype() const;
 
   MaybeRef<Shape> shape() const;
 
@@ -106,36 +125,29 @@ class TORCH_API LazyTensor : public c10::intrusive_ptr_target {
 
   // Retrieves the IR Node representing this LazyTensor. One will be created if
   // missing. Note that although this is a const API, it actually changes the
-  // internal state ofthe object.
+  // internal state of the object.
   Value GetIrValue() const;
 
   void SetIrValue(Value ir_value);
   void SetInPlaceIrValue(Value ir_value);
 
-  c10::optional<at::Tensor> CurrentTensorData() const;
+  std::optional<at::Tensor> CurrentTensorData() const;
 
-  std::vector<LazyTensorPtr> MakeOutputTensors(NodePtr node) const;
+  std::vector<LazyTensorPtr> MakeOutputTensors(const NodePtr& node) const;
 
   LazyTensorPtr CopyTensorToDevice(const BackendDevice& device);
 
   // Applies the queue of operations in preparation for using the data.
-  void ApplyPendingGraph();
+  // Override it to use your own graph executor.
+  virtual void ApplyPendingGraph();
 
- private:
-  LazyTensor(const at::Tensor& tensor, const BackendDevice& device);
-  LazyTensor(Value ir_value, const BackendDevice& device);
-  explicit LazyTensor(BackendDataPtr handle);
+  // Override it to set extra information.
+  virtual void AssignIrValue(Value ir_value) const;
+
+ protected:
   explicit LazyTensor(std::shared_ptr<Data> data);
 
-  std::shared_ptr<Data> data_ptr() const {
-    return data_;
-  }
-
-  void AssignIrValue(Value ir_value) const;
-
   void SetTensorData(at::Tensor tensor_data);
-
-  Value CreateTensorNode(BackendDataPtr data, bool read_only) const;
 
   // We build a graph accumulating operations, but at a given point we
   // need to force a rendering, otherwise the graph can grow without control.
@@ -144,9 +156,17 @@ class TORCH_API LazyTensor : public c10::intrusive_ptr_target {
   //     a = a + b
   void TryLimitGraphSize();
 
-  Value GetIrValueForTensor(
+  // Override it to instantiate your own data.
+  virtual Value GetIrValueForTensor(
       const at::Tensor& tensor,
       const BackendDevice& device) const;
+
+  Value CreateTensorNode(const BackendDataPtr& data, bool read_only) const;
+
+ private:
+  LazyTensor(const at::Tensor& tensor, const BackendDevice& device);
+  LazyTensor(Value ir_value, const BackendDevice& device);
+  explicit LazyTensor(const BackendDataPtr& handle);
 
   static int64_t GetNextTensorId();
 
@@ -178,7 +198,7 @@ TORCH_API std::vector<LazyTensorPtr> GetLtcTensors(
 // If tensor is a lazy tensor type, returns the LazyTensor embedded within it,
 // otherwise creates a new lazy tensor type with tensor as data.
 TORCH_API LazyTensorPtr GetOrCreateLtcTensor(
-    const c10::optional<at::Tensor>& tensor,
+    const std::optional<at::Tensor>& tensor,
     const BackendDevice& device);
 
 TORCH_API LazyTensorPtr GetLtcTensorOrCreateForWrappedNumber(
@@ -186,7 +206,7 @@ TORCH_API LazyTensorPtr GetLtcTensorOrCreateForWrappedNumber(
     const BackendDevice& device);
 
 // Section 2: LazyTensor => at::Tensor.
-// Creates an ATen tensor from an LazyTensor.
+// Creates an ATen tensor from a LazyTensor.
 TORCH_API at::Tensor CreateAtenFromLtcTensor(const LazyTensorPtr& ltc_tensor);
 TORCH_API at::Tensor CreateAtenFromLtcTensor(LazyTensor&& ltc_tensor);
 
@@ -211,7 +231,7 @@ TORCH_API at::Tensor CreateAtenFromLtcTensor(LazyTensor&& ltc_tensor);
 //   lazy tensors, then you should think of that function as an "entrypoint" to
 //   functionalization, and use functionalize_output=true Examples include:
 //   - factory functions (the LTC kernel for at::empty)
-//   - CPU -> Lazy device converions (the LTC kernel for at::to_device)
+//   - CPU -> Lazy device conversions (the LTC kernel for at::to_device)
 //
 // Case 2: lazy -> lazy
 //   If you're implementing a function that takes in lazy tensors and returns
@@ -233,7 +253,7 @@ TORCH_API at::Tensor to_lazy_tensor(
 template <size_t... Indices>
 auto TupleAtenFromLtcTensorsImpl(
     const std::vector<LazyTensorPtr>& tensors,
-    std::index_sequence<Indices...>) {
+    std::index_sequence<Indices...> /*unused*/) {
   return std::make_tuple(CreateAtenFromLtcTensor(tensors[Indices])...);
 }
 
@@ -242,5 +262,4 @@ auto TupleAtenFromLtcTensors(const std::vector<LazyTensorPtr>& tensors) {
   return TupleAtenFromLtcTensorsImpl(tensors, std::make_index_sequence<N>{});
 }
 
-} // namespace lazy
-} // namespace torch
+} // namespace torch::lazy

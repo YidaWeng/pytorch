@@ -2,10 +2,11 @@
 #include <ATen/native/Activation.h>
 
 #include <ATen/core/Tensor.h>
+#include <ATen/Config.h>
 #include <ATen/Dispatch.h>
 #include <ATen/TensorIterator.h>
 #include <ATen/TensorOperators.h>
-#include <ATen/Parallel.h>
+#include <ATen/OpMathType.h>
 #include <ATen/ScalarOps.h>
 #if defined(C10_MOBILE) && defined(USE_XNNPACK)
 #include <ATen/native/xnnpack/Engine.h>
@@ -13,6 +14,7 @@
 #include <ATen/core/DistributionsHelper.h>
 
 #include <c10/util/irange.h>
+#include <c10/core/ScalarType.h>
 #if AT_MKLDNN_ENABLED()
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
 #include <ATen/native/mkldnn/Utils.h>
@@ -52,10 +54,13 @@
 #include <ATen/ops/log_sigmoid_native.h>
 #include <ATen/ops/mish_backward_native.h>
 #include <ATen/ops/mish_native.h>
-#include <ATen/ops/prelu_backward_native.h>
 #include <ATen/ops/prelu_native.h>
+#include <ATen/ops/_prelu_kernel.h>
+#include <ATen/ops/_prelu_kernel_native.h>
+#include <ATen/ops/_prelu_kernel_backward_native.h>
 #include <ATen/ops/relu6_native.h>
 #include <ATen/ops/relu_native.h>
+#include <ATen/ops/result_type.h>
 #include <ATen/ops/rrelu_native.h>
 #include <ATen/ops/rrelu_with_noise.h>
 #include <ATen/ops/rrelu_with_noise_backward_native.h>
@@ -72,11 +77,11 @@
 #include <ATen/ops/tanh.h>
 #include <ATen/ops/threshold_backward_native.h>
 #include <ATen/ops/threshold_native.h>
-#include <ATen/ops/zeros_like.h>
+
+#include <utility>
 #endif
 
-namespace at {
-namespace meta {
+namespace at::meta {
 // computes `result = self <= threshold ? value : other`
 // other is `self` in threshold() and `grad` in threshold_backward()
 TORCH_META_FUNC(threshold)(const Tensor& self, const Scalar& threshold, const Scalar& value) {
@@ -84,8 +89,8 @@ TORCH_META_FUNC(threshold)(const Tensor& self, const Scalar& threshold, const Sc
   build(TensorIteratorConfig()
     .set_check_mem_overlap(false)  // threshold is idempotent, so overlap is okay
     .add_output(result)
-    .add_input(self)
-    .add_input(self) // other
+    .add_const_input(self)
+    .add_const_input(self) // other
     .allow_cpu_scalars(true)
     .promote_inputs_to_common_dtype(true)
     .cast_common_dtype_to_outputs(true)
@@ -98,8 +103,8 @@ TORCH_META_FUNC(threshold_backward)(const Tensor& grad, const Tensor& self, cons
   build(TensorIteratorConfig()
     .set_check_mem_overlap(false)  // threshold is idempotent, so overlap is okay
     .add_output(gradInput)
-    .add_input(self)
-    .add_input(grad)  // other
+    .add_const_input(self)
+    .add_const_input(grad)  // other
     .allow_cpu_scalars(true)
     .promote_inputs_to_common_dtype(true)
     .cast_common_dtype_to_outputs(true)
@@ -204,15 +209,17 @@ TORCH_META_FUNC(hardshrink_backward) (
   build_borrowing_binary_op(maybe_get_output(), grad, self);
 }
 
-static inline void softshrink_check(const Scalar& lambd) {
-  double lamb = lambd.to<double>();
-  TORCH_CHECK(lamb >= 0, "lambda must be greater or equal to 0, but found to be ", lamb, ".");
-}
-
 TORCH_META_FUNC(softshrink) (
   const Tensor & self, const Scalar& lambd
 ) {
-  softshrink_check(lambd);
+  double lamb = lambd.to<double>();
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
+    self.scalar_type(), "softshrink_check", [&] {
+    auto max_val = static_cast<double>(std::numeric_limits<scalar_t>::max());
+    TORCH_CHECK(0 <= lamb && lamb <= max_val,
+      "lambda must be in range [0, ", max_val, "] for input dtype ",
+      self.scalar_type(), ", but found ", lamb);
+  });
   build_unary_op(maybe_get_output(), self);
 }
 
@@ -222,22 +229,22 @@ TORCH_META_FUNC(softshrink_backward) (
   build_borrowing_binary_op(maybe_get_output(), grad, self);
 }
 
-TORCH_META_FUNC(gelu) (const Tensor & self, c10::string_view approximate) {
+TORCH_META_FUNC(gelu) (const Tensor & self, std::string_view approximate) {
   build_unary_op(maybe_get_output(), self);
 }
 
 TORCH_META_FUNC(gelu_backward) (
-  const Tensor& grad, const Tensor& self, c10::string_view approximate
+  const Tensor& grad, const Tensor& self, std::string_view approximate
 ) {
   build_borrowing_binary_op(maybe_get_output(), grad, self);
 }
 
-} // namespace meta
+} // namespace at::meta
 
-namespace native {
+namespace at::native {
 
-static const double SELU_ALPHA = 1.6732632423543772848170429916717;
-static const double SELU_SCALE = 1.0507009873554804934193349852946;
+static constexpr double SELU_ALPHA = 1.6732632423543772848170429916717;
+static constexpr double SELU_SCALE = 1.0507009873554804934193349852946;
 
 DEFINE_DISPATCH(elu_stub);
 DEFINE_DISPATCH(elu_backward_stub);
@@ -260,8 +267,8 @@ DEFINE_DISPATCH(silu_stub);
 DEFINE_DISPATCH(silu_backward_stub);
 DEFINE_DISPATCH(mish_stub);
 DEFINE_DISPATCH(mish_backward_stub);
-DEFINE_DISPATCH(prelu_cpu_stub);
-DEFINE_DISPATCH(prelu_backward_cpu_stub);
+DEFINE_DISPATCH(prelu_stub);
+DEFINE_DISPATCH(prelu_backward_stub);
 
 TORCH_IMPL_FUNC(elu_out) (
   const Tensor& self, const Scalar& alpha, const Scalar& scale, const Scalar& input_scale, const Tensor& result
@@ -367,8 +374,8 @@ TORCH_IMPL_FUNC(softshrink_backward_out) (
   shrink_backward_stub(device_type(), *this, lambd);
 }
 
-bool use_mkldnn(const Tensor& input) {
 #if AT_MKLDNN_ENABLED()
+static bool use_mkldnn(const Tensor& input) {
   if (!at::globalContext().userEnabledMkldnn()) {
     return false;
   }
@@ -378,21 +385,28 @@ bool use_mkldnn(const Tensor& input) {
   return (input.is_mkldnn()) || // input is mkldnn Tensor
     (input.device().is_cpu() &&
     (((input.scalar_type() == kBFloat16) && mkldnn_bf16_device_check()) ||
-    (input.scalar_type() == kFloat))); // input is dense layout and bfloat16/float32
-#endif
-  return false;
+    ((input.scalar_type() == kHalf) && mkldnn_fp16_device_check()) ||
+    (input.scalar_type() == kFloat))); // input is dense layout and bfloat16/float16/float32
 }
+#endif
 
 TORCH_IMPL_FUNC(gelu_out_cpu) (
-  const Tensor& self, c10::string_view approximate, const Tensor& result
+  const Tensor& self, std::string_view approximate, const Tensor& result
 ) {
 auto approximate_type = get_gelutype_enum(approximate);
 #if AT_MKLDNN_ENABLED()
   if (use_mkldnn(self) && (approximate_type == GeluType::None)) {
-    const ideep::tensor& x = itensor_from_tensor(self);
+    const ideep::tensor& x = itensor_from_tensor(self, /*from_const_data_ptr*/true);
     ideep::tensor y = itensor_from_tensor(result);
     ideep::eltwise_forward::compute(
       x, y, ideep::algorithm::eltwise_gelu_erf, ideep::prop_kind::forward_training, /*alpha*/ 0.0);
+#ifdef __aarch64__
+  } else if (use_mkldnn(self) && (approximate_type == GeluType::Tanh)) {
+    const ideep::tensor& x = itensor_from_tensor(self, /*from_const_data_ptr*/true);
+    ideep::tensor y = itensor_from_tensor(result);
+    ideep::eltwise_forward::compute(
+      x, y, ideep::algorithm::eltwise_gelu_tanh, ideep::prop_kind::forward_training, /*alpha*/ 0.0);
+#endif  // ifdef __aarch64__
   } else {
     GeluKernel(kCPU, *this, approximate_type);
   }
@@ -402,13 +416,13 @@ auto approximate_type = get_gelutype_enum(approximate);
 }
 
 TORCH_IMPL_FUNC(gelu_backward_out_cpu) (
-  const Tensor& grad, const Tensor& self, c10::string_view approximate, const Tensor& grad_input
+  const Tensor& grad, const Tensor& self, std::string_view approximate, const Tensor& grad_input
 ) {
 auto approximate_type = get_gelutype_enum(approximate);
 #if AT_MKLDNN_ENABLED()
   if (use_mkldnn(self) && (approximate_type == GeluType::None)) {
-    const ideep::tensor& x = itensor_from_tensor(self);
-    ideep::tensor grady = itensor_from_tensor(grad);
+    const ideep::tensor& x = itensor_from_tensor(self, /*from_const_data_ptr*/true);
+    ideep::tensor grady = itensor_from_tensor(grad, /*from_const_data_ptr*/true);
     ideep::tensor gradx = itensor_from_tensor(grad_input);
     ideep::eltwise_backward::compute(x, grady, gradx,
       ideep::algorithm::eltwise_gelu_erf, /*alpha*/ 0.0);
@@ -426,15 +440,13 @@ Tensor hardtanh(const Tensor& self, const Scalar& min, const Scalar& max) {
 }
 
 Tensor& hardtanh_out(const Tensor& self, const Scalar& min, const Scalar& max, Tensor& result) {
-  TORCH_CHECK(self.scalar_type() != at::kBool,
+  TORCH_CHECK_NOT_IMPLEMENTED(self.scalar_type() != at::kBool,
   "Bool inputs not supported for hardtanh");
   //preserve legacy behavior of boundaries not causing type promotion
   Scalar min_, max_;
   if (at::isIntegralType(self.scalar_type(), /*include_bool*/false)) {
     int64_t minval = min.toLong();
     int64_t maxval = max.toLong();
-    TORCH_CHECK(self.dtype() != at::kByte || (minval >= 0 &&
-       maxval >=0), "cannot do hardtanh on an unsigned type with negative limits");
     min_ = minval;
     max_ = maxval;
   } else {
@@ -499,12 +511,12 @@ Tensor hardswish_backward(const Tensor& grad_output, const Tensor& self) {
 }
 
 Tensor relu(const Tensor & self) {
-  TORCH_CHECK(self.scalar_type() != at::kBool, "Boolean inputs not supported for relu");
+  TORCH_CHECK_NOT_IMPLEMENTED(self.scalar_type() != at::kBool, "Boolean inputs not supported for relu");
   return at::clamp_min(self, 0);
 }
 
 Tensor & relu_(Tensor & self) {
-  TORCH_CHECK(self.scalar_type() != at::kBool, "Boolean inputs not supported for relu");
+  TORCH_CHECK_NOT_IMPLEMENTED(self.scalar_type() != at::kBool, "Boolean inputs not supported for relu");
   return at::clamp_min_(self, 0);
 }
 
@@ -563,25 +575,26 @@ Tensor math_mish_backward(
 }
 
 template <typename scalar_t>
-inline void _rrelu_with_noise_train(
+static void _rrelu_with_noise_train(
     Tensor& output,
     const Tensor& input,
-    const Tensor& noise,
+    Tensor& noise,
     const Scalar& lower_,
     const Scalar& upper_,
-    c10::optional<Generator> generator) {
-  scalar_t lower = lower_.to<scalar_t>();
-  scalar_t upper = upper_.to<scalar_t>();
+    const std::optional<Generator>& generator) {
+  using opmath_t = at::opmath_type<scalar_t>;
+  opmath_t lower = lower_.to<opmath_t>();
+  opmath_t upper = upper_.to<opmath_t>();
   Tensor tmp_tensor = output.contiguous();
-  scalar_t* output_data = tmp_tensor.data_ptr<scalar_t>();
-  scalar_t* input_data = input.data_ptr<scalar_t>();
-  scalar_t* noise_data = noise.data_ptr<scalar_t>();
+  scalar_t* output_data = tmp_tensor.mutable_data_ptr<scalar_t>();
+  const scalar_t* input_data = input.const_data_ptr<scalar_t>();
+  scalar_t* noise_data = noise.mutable_data_ptr<scalar_t>();
   auto gen  = at::get_generator_or_default<CPUGeneratorImpl>(generator, detail::getDefaultCPUGenerator());
   std::lock_guard<std::mutex> lock(gen->mutex_);
   for (const auto i : c10::irange(input.numel())) {
     if (input_data[i] <= 0) {
       at::uniform_real_distribution<double> uniform(lower, upper);
-      const scalar_t r = (scalar_t)uniform(gen);
+      const opmath_t r = (opmath_t)uniform(gen);
       output_data[i] = input_data[i] * r;
       noise_data[i] = r;
     } else {
@@ -595,12 +608,13 @@ inline void _rrelu_with_noise_train(
 }
 
 Tensor& rrelu_with_noise_out_cpu(const Tensor& self,
-    const Tensor& noise,
+    Tensor& noise,
     const Scalar& lower,
     const Scalar& upper,
     bool training,
-    c10::optional<Generator> generator,
+    std::optional<Generator> generator,
     Tensor& output) {
+  TORCH_CHECK(self.sym_sizes() == noise.sym_sizes(), "noise tensor shape must match self tensor shape. Got self.shape = ", self.sym_sizes(), " noise.shape = ", noise.sym_sizes());
   if (training) {
     AT_DISPATCH_FLOATING_TYPES_AND(ScalarType::BFloat16, self.scalar_type(), "rrelu_with_noise_out_cpu", [&] {
       _rrelu_with_noise_train<scalar_t>(output, self.contiguous(), noise, lower, upper, generator);
@@ -617,25 +631,25 @@ Tensor& rrelu_with_noise_out_cpu(const Tensor& self,
 
 Tensor rrelu_with_noise_cpu(
     const Tensor& self,
-    const Tensor& noise,
+    Tensor& noise,
     const Scalar& lower,
     const Scalar& upper,
     bool training,
-    c10::optional<Generator> generator) {
+    std::optional<Generator> generator) {
   auto output = at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
   return at::native::rrelu_with_noise_out_cpu(
-      self, noise, lower, upper, training, generator, output);
+      self, noise, lower, upper, training, std::move(generator), output);
 }
 
 Tensor& rrelu_with_noise_cpu_(
     Tensor& self,
-    const Tensor& noise,
+    Tensor& noise,
     const Scalar& lower,
     const Scalar& upper,
     bool training,
-    c10::optional<Generator> generator) {
+    std::optional<Generator> generator) {
   return at::native::rrelu_with_noise_out_cpu(
-      self, noise, lower, upper, training, generator, self);
+      self, noise, lower, upper, training, std::move(generator), self);
 }
 
 Tensor rrelu_with_noise_backward(
@@ -656,14 +670,18 @@ Tensor rrelu_with_noise_backward(
   }
 }
 
-Tensor rrelu(const Tensor & self, const Scalar& lower, const Scalar& upper, bool training, c10::optional<Generator> generator) {
-  TORCH_CHECK(lower.to<double>() <= upper.to<double>(), "Lower bound should be less than or equal to the upper bound")
-  return at::rrelu_with_noise(self, at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT), lower, upper, training, generator);
+Tensor rrelu(const Tensor & self, const Scalar& lower, const Scalar& upper, bool training, std::optional<Generator> generator) {
+  TORCH_CHECK(std::isfinite(lower.to<double>()), "rrelu: lower bound must be finite, got ", lower.to<double>());
+  TORCH_CHECK(std::isfinite(upper.to<double>()), "rrelu: upper bound must be finite, got ", upper.to<double>());
+  TORCH_CHECK(lower.to<double>() <= upper.to<double>(), "Lower bound should be less than or equal to the upper bound");
+  auto noise = at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
+  return at::rrelu_with_noise(self, noise, lower, upper, training, std::move(generator));
 }
 
-Tensor & rrelu_(Tensor & self, const Scalar& lower, const Scalar& upper, bool training, c10::optional<Generator> generator) {
-  TORCH_CHECK(lower.to<double>() <= upper.to<double>(), "Lower bound should be less than or equal to the upper bound")
-  return at::rrelu_with_noise_(self, at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT), lower, upper, training, generator);
+Tensor & rrelu_(Tensor & self, const Scalar& lower, const Scalar& upper, bool training, std::optional<Generator> generator) {
+  TORCH_CHECK(lower.to<double>() <= upper.to<double>(), "Lower bound should be less than or equal to the upper bound");
+  auto noise = at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
+  return at::rrelu_with_noise_(self, noise, lower, upper, training, std::move(generator));
 }
 
 TORCH_IMPL_FUNC(threshold_out)(const Tensor& self, const Scalar& threshold, const Scalar& value, const Tensor& result) {
@@ -674,141 +692,83 @@ TORCH_IMPL_FUNC(threshold_backward_out)(const Tensor& grad, const Tensor& self, 
   threshold_stub(device_type(), *this, threshold, 0);
 }
 
-Tensor prelu_cpu(const Tensor& self, const Tensor& weight_) {
-  int64_t weight_num = weight_.numel();
-  Tensor result = at::empty_like(self, self.suggest_memory_format());
+Tensor prelu(const Tensor& self, const Tensor& weight_) {
   TORCH_INTERNAL_ASSERT(weight_.defined());
+  auto self_dim = self.dim();
+  TORCH_CHECK(self.scalar_type() == weight_.scalar_type(),
+              "prelu: Type promoting not supported. Got ",
+              self.scalar_type(), " and ", weight_.scalar_type());
+  if (weight_.sym_numel() != 1) {
+    TORCH_CHECK(self_dim > 0, "Not allow zero-dim input tensor.");
 
-  if (weight_num != 1) {
-    int64_t input_ndim = self.dim();
-    TORCH_CHECK(input_ndim > 0, "Not allow zero-dim input tensor.");
-
-    int64_t channel_size = 1; // channel_size default to 1
-    if (input_ndim > 1) {
-      channel_size = self.size(1); // channel is the 2nd dim of input
-    }
-    TORCH_CHECK(channel_size == weight_num,
-      "Mismatch of parameter numbers and input channel size. Found parameter numbers = ", weight_num,
+    auto channel_size = self_dim > 1 ? self.sym_size(1) : 1; // channel_size default to 1
+    TORCH_CHECK(channel_size == weight_.sym_numel(),
+      "Mismatch of parameter numbers and input channel size. Found parameter numbers = ", weight_.numel(),
       " and channel size = ", channel_size, ".");
   }
 
-  const int64_t ndim = self.dim();
-  // Helper to convert 1d tensors or scalar tensor to an nd tensor that broadcasts with input
-  // All elements go into the channel dimension
-  DimVector sizes(ndim, 1), strides(ndim, 0);
-  auto as_nd = [&](const Tensor& t) {
-    TORCH_CHECK(
-      t.dim() == 1 || t.dim() == 0,
-      "prelu: Expected `weight` to be a scalar or 1D tensor, but got ndim = ", t.dim());
-    if (ndim >= 2) {
-      sizes[1] = t.dim() == 1 ? t.size(0) : 1;
-      strides[1] = t.dim() == 1 ? t.stride(0) : 0;
-      return t.as_strided(sizes, strides);
+  TORCH_CHECK(
+    weight_.dim() <= 1,
+    "prelu: Expected `weight` to be a scalar or 1D tensor, but got: ndim = ", weight_.dim());
+  // Adjust weight to broadcast over self and have weight.ndim == self.ndim
+  auto weight = weight_;
+  if (self_dim != weight.dim()) {
+    SymDimVector dim_w(self_dim, 1);
+    if (self_dim > 1) {
+      dim_w[1] = weight_.sym_numel();
     }
-    return t.as_strided(sizes, strides);
-  };
-  Tensor w;
-  if (self.scalar_type() == ScalarType::BFloat16) {
-    auto w_bf16 = at::empty(weight_.sizes(), weight_.options().dtype(ScalarType::BFloat16));
-    w_bf16.copy_(weight_);
-    w = as_nd(w_bf16);
-  } else {
-    w = as_nd(weight_);
+    // This will always be a view in CPU/CUDA, but some backends
+    // like MKLDNN do not support views
+    weight = weight.reshape_symint(dim_w);
   }
+  return at::_prelu_kernel(self, weight);
+}
 
+
+Tensor _prelu_kernel(const Tensor& self, const Tensor& weight) {
+  // Weight broadcasts over self and they have the same dtype
+  auto result = at::empty_like(self);
   auto iter = TensorIteratorConfig()
     .add_output(result)
-    .add_input(self)
-    .add_input(w)
+    .add_const_input(self)
+    .add_const_input(weight)
     .build();
-  prelu_cpu_stub(iter.device_type(), iter);
+  prelu_stub(iter.device_type(), iter);
   return result;
 }
 
-std::tuple<Tensor, Tensor> prelu_backward_cpu(const Tensor& grad_out_, const Tensor& self, const Tensor& weight_) {
-  int64_t weight_num = weight_.numel();
-
-  Tensor input_grad = at::empty_like(self, self.suggest_memory_format());
-  Tensor weight_grad = at::empty_like(weight_, at::MemoryFormat::Contiguous);
-  Tensor weight_grad_collector = at::empty_like(self, at::MemoryFormat::Contiguous);
-
-  if (weight_num != 1) {
-    int64_t input_ndim = self.dim();
-    TORCH_CHECK(input_ndim > 0, "Not allow zero-dim input tensor.");
-
-    int64_t channel_size = 1; // channel_size default to 1
-    if (input_ndim > 1) {
-      channel_size = self.size(1); // channel is the 2nd dim of input
-    }
-    TORCH_CHECK(channel_size == weight_num,
-      "Mismatch of parameter numbers and input channel size. Found parameter numbers = ", weight_num,
-      " and channel size = ", channel_size, ".");
-  }
-
-  const int64_t ndim = self.dim();
-  // Helper to convert 1d tensor or scalar tensor to an nd tensor that broadcasts with input
-  // All elements go into the channel dimension
-  DimVector sizes(ndim, 1), strides(ndim, 0);
-  auto as_nd = [&](const Tensor& t) {
-    TORCH_INTERNAL_ASSERT(t.defined() && (t.dim() == 1 || t.dim() == 0));
-    if (ndim >= 2) {
-      sizes[1] = t.dim() == 1 ? t.sizes()[0] : 1;
-      strides[1] = t.dim() == 1 ? t.strides()[0] : 0;
-      return t.as_strided(sizes, strides);
-    }
-    return t.as_strided(sizes, strides);
-  };
-  Tensor w;
-  if (self.scalar_type() == ScalarType::BFloat16) {
-    auto w_bf16 = at::empty(weight_.sizes(), weight_.options().dtype(ScalarType::BFloat16));
-    w_bf16.copy_(weight_);
-    w = weight_.defined() ? as_nd(w_bf16) :
-        at::detail::scalar_tensor_static(1, self.scalar_type(), kCPU);
-  } else {
-    w = weight_.defined() ? as_nd(weight_) :
-        at::detail::scalar_tensor_static(1, self.scalar_type(), kCPU);
-  }
-
+std::tuple<Tensor, Tensor> _prelu_kernel_backward(const Tensor& grad_out, const Tensor& self, const Tensor& weight) {
+  Tensor grad_self = at::empty({0}, self.options());
+  Tensor grad_weight = at::empty({0}, weight.options());
   auto iter = TensorIteratorConfig()
-    .add_output(input_grad)
-    .add_output(weight_grad_collector)
-    .add_input(self)
-    .add_input(grad_out_)
-    .add_input(w)
+    .add_output(grad_self)
+    .add_output(grad_weight)
+    .add_const_input(self)
+    .add_const_input(weight)
+    .add_const_input(grad_out)
     .build();
-
-  prelu_backward_cpu_stub(iter.device_type(), iter);
-
-  if (weight_num == 1) {
-    weight_grad.fill_(weight_grad_collector.sum());
-  } else {
-    // update weight_grad
-    std::vector<int64_t> reduce_dims;
-    int64_t input_ndim = self.dim();
-    reduce_dims.push_back(0);
-    if (input_ndim > 2) {
-      for(int64_t i = 2; i < input_ndim; i++) reduce_dims.push_back(i);
-    }
-    weight_grad = weight_grad_collector.sum(reduce_dims);
-  }
-  return std::tuple<Tensor, Tensor>{input_grad, weight_grad};
+  prelu_backward_stub(iter.device_type(), iter);
+  return {grad_self, grad_weight};
 }
 
 Tensor infinitely_differentiable_gelu_backward(
     const Tensor& grad,
     const Tensor& self) {
   constexpr double kAlpha = M_2_SQRTPI * M_SQRT1_2 * 0.5;
-  Tensor cdf = (1.0 + (self * M_SQRT1_2).erf_()).mul_(0.5);
-  Tensor pdf = (-0.5 * self * self).exp_();
-  return cdf.addcmul_(self, pdf, kAlpha).mul_(grad);
+  const auto result_dtype = at::result_type(grad, self);
+  const auto opmath_dtype = at::toOpMathType(result_dtype);
+  const Tensor grad_ = grad.to(opmath_dtype);
+  const Tensor self_ = self.to(opmath_dtype);
+  Tensor cdf = (1.0 + (self_ * M_SQRT1_2).erf_()).mul_(0.5);
+  Tensor pdf = (-0.5 * self_ * self_).exp_();
+  return cdf.addcmul_(self_, pdf, kAlpha).mul_(grad_).to(result_dtype);
 }
 
 std::tuple<Tensor, Tensor> log_sigmoid_forward_cpu(const Tensor& input) {
-  // FIXME: do these actually need to be zeros_like or can they be empty_like?
-  auto result = at::zeros_like(input, at::MemoryFormat::Contiguous);
-  auto buffer = at::zeros_like(input, at::MemoryFormat::Contiguous);
+  auto result = at::empty_like(input, at::MemoryFormat::Contiguous);
+  auto buffer = at::empty_like(input, at::MemoryFormat::Contiguous);
   log_sigmoid_cpu_stub(kCPU, result, buffer, input.contiguous());
-  return std::make_tuple(result, buffer);
+  return std::make_tuple(std::move(result), std::move(buffer));
 }
 
 std::tuple<Tensor&, Tensor&> log_sigmoid_forward_out_cpu(const Tensor& input, Tensor& result, Tensor& buffer) {
@@ -837,8 +797,8 @@ Tensor log_sigmoid_backward_cuda(const Tensor& grad_output, const Tensor& input,
   // NOTE: buffer is only used by CPU dispatch, we just ignore it here
   auto iter = at::TensorIteratorConfig()
       .add_output(grad_input)
-      .add_input(input)
-      .add_input(grad_output)
+      .add_const_input(input)
+      .add_const_input(grad_output)
       .build();
   log_sigmoid_backward_stub(kCUDA, iter);
   return iter.output();
@@ -848,9 +808,9 @@ Tensor log_sigmoid_backward_cpu(const Tensor& grad_output, const Tensor& input, 
   auto grad_input = at::empty_like(grad_output);
   auto iter = at::TensorIteratorConfig()
       .add_output(grad_input)
-      .add_input(input)
-      .add_input(buffer)
-      .add_input(grad_output)
+      .add_const_input(input)
+      .add_const_input(buffer)
+      .add_const_input(grad_output)
       .build();
   log_sigmoid_backward_stub(kCPU, iter);
   return iter.output();
@@ -860,8 +820,8 @@ Tensor& log_sigmoid_backward_cuda_out(const Tensor& grad_output, const Tensor& i
                                       const Tensor& buffer, Tensor& grad_input) {
   auto iter = TensorIteratorConfig()
       .add_output(grad_input)
-      .add_input(input)
-      .add_input(grad_output)
+      .add_const_input(input)
+      .add_const_input(grad_output)
       .build();
   log_sigmoid_backward_stub(kCUDA, iter);
   return grad_input;
@@ -873,9 +833,9 @@ Tensor& log_sigmoid_backward_cpu_out(const Tensor& grad_output,
     Tensor& grad_input) {
   auto iter = TensorIteratorConfig()
       .add_output(grad_input)
-      .add_input(input)
-      .add_input(buffer)
-      .add_input(grad_output)
+      .add_const_input(input)
+      .add_const_input(buffer)
+      .add_const_input(grad_output)
       .build();
   log_sigmoid_backward_stub(kCPU, iter);
   return grad_input;
@@ -884,4 +844,4 @@ Tensor& log_sigmoid_backward_cpu_out(const Tensor& grad_output,
 DEFINE_DISPATCH(GeluKernel);
 DEFINE_DISPATCH(GeluBackwardKernel);
 
-}}  // namespace at::native
+}  // namespace at::native

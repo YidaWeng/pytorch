@@ -2,11 +2,9 @@
 #include <ATen/native/TensorIterator.h>
 #include <c10/util/irange.h>
 
-namespace at {
-namespace native {
+namespace at::native {
 
-namespace {
-static bool is_constant_index(int ntensor, const int64_t* strides) {
+inline bool is_constant_index(int ntensor, const int64_t* strides) {
   AT_ASSERT(ntensor >= 3);
   for (const auto arg : c10::irange(2, ntensor)) {
     if (strides[arg] != 0) {
@@ -49,15 +47,27 @@ struct Indexer {
     }
     return offset;
   }
+
+  // Single index-tensor fast path: same result as get() when num_indexers == 1.
+  int64_t get_1(int64_t idx) {
+    TORCH_INTERNAL_ASSERT_DEBUG_ONLY(num_indexers == 1);
+    int64_t value = *(int64_t*)&indexers[0][idx * indexer_strides[0]];
+    int64_t size = original_sizes[0];
+    TORCH_CHECK_INDEX(value >= -size && value < size,
+                      "index ", value, " is out of bounds for dimension 0 with size ", size);
+    if (value < 0) {
+      value += size;
+    }
+    return value * original_strides[0];
+  }
 };
-} // anonymous namespace
 
 template <typename scalar_t, typename func_t>
 void cpu_index_kernel(TensorIteratorBase& iter, IntArrayRef index_size, IntArrayRef index_stride,
                       const func_t& f, bool serial_execution=false)
 {
   int ntensor = iter.ntensors();
-  // When launch the index parallel version, set a relative samll grain size less than the INTERNAL::GRAIN_SIZE
+  // When launch the index parallel version, set a relative small grain size less than the INTERNAL::GRAIN_SIZE
   // to make the whole available thread numbers get more balanced work load and a better cache location.
   // The grain size here is chosen by the op benchmark to overcome the thread launch overhead
   const int index_parallel_grain_size = 3000;
@@ -68,14 +78,14 @@ void cpu_index_kernel(TensorIteratorBase& iter, IntArrayRef index_size, IntArray
     if (is_constant_index(ntensor, strides)) {
       // specialization for when every element uses the same index
       int64_t offset = indexer.get(0);
-      if (strides[0] == sizeof(scalar_t) && strides[1] == sizeof(scalar_t)) {
-        for (const auto i : c10::irange(n)) {
-          f(dst + strides[0] * i, src + strides[1] * i, offset);
-        }
-      } else {
-        for (const auto i : c10::irange(n)) {
-          f(dst + strides[0] * i, src + strides[1] * i, offset);
-        }
+      for (const auto i : c10::irange(n)) {
+        f(dst + strides[0] * i, src + strides[1] * i, offset);
+      }
+    } else if (indexer.num_indexers == 1) {
+      // specialization for a single index tensor
+      for (const auto i : c10::irange(n)) {
+        int64_t offset = indexer.get_1(i);
+        f(dst + strides[0] * i, src + strides[1] * i, offset);
       }
     } else {
       for (const auto i : c10::irange(n)) {
@@ -91,4 +101,4 @@ void cpu_index_kernel(TensorIteratorBase& iter, IntArrayRef index_size, IntArray
   }
 }
 } // at
-} // native
+// native

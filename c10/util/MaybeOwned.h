@@ -2,9 +2,10 @@
 
 #include <c10/macros/Macros.h>
 #include <c10/util/Exception.h>
-#include <c10/util/in_place.h>
 
+#include <memory>
 #include <type_traits>
+#include <utility>
 
 namespace c10 {
 
@@ -16,7 +17,7 @@ struct MaybeOwnedTraitsGenericImpl {
   using owned_type = T;
   using borrow_type = const T*;
 
-  static borrow_type createBorrow(const owned_type& from) {
+  static borrow_type createBorrow(const owned_type& from C10_LIFETIMEBOUND) {
     return &from;
   }
 
@@ -72,17 +73,16 @@ class MaybeOwned final {
   };
 
   /// Don't use this; use borrowed() instead.
-  explicit MaybeOwned(const owned_type& t)
+  explicit MaybeOwned(const owned_type& t C10_LIFETIMEBOUND)
       : isBorrowed_(true), borrow_(MaybeOwnedTraits<T>::createBorrow(t)) {}
 
   /// Don't use this; use owned() instead.
-  explicit MaybeOwned(T&& t) noexcept(
-      std::is_nothrow_move_constructible<T>::value)
+  explicit MaybeOwned(T&& t) noexcept(std::is_nothrow_move_constructible_v<T>)
       : isBorrowed_(false), own_(std::move(t)) {}
 
   /// Don't use this; use owned() instead.
   template <class... Args>
-  explicit MaybeOwned(in_place_t, Args&&... args)
+  explicit MaybeOwned(std::in_place_t /*unused*/, Args&&... args)
       : isBorrowed_(false), own_(std::forward<Args>(args)...) {}
 
  public:
@@ -126,7 +126,9 @@ class MaybeOwned final {
   }
 
   MaybeOwned(MaybeOwned&& rhs) noexcept(
-      std::is_nothrow_move_constructible<T>::value)
+      // NOLINTNEXTLINE(*-noexcept-move-*)
+      std::is_nothrow_move_constructible_v<T> &&
+      std::is_nothrow_move_assignable_v<borrow_type>)
       : isBorrowed_(rhs.isBorrowed_) {
     if (C10_LIKELY(rhs.isBorrowed_)) {
       MaybeOwnedTraits<T>::assignBorrow(borrow_, rhs.borrow_);
@@ -136,7 +138,12 @@ class MaybeOwned final {
   }
 
   MaybeOwned& operator=(MaybeOwned&& rhs) noexcept(
-      std::is_nothrow_move_assignable<T>::value) {
+      std::is_nothrow_move_assignable_v<T> &&
+      std::is_nothrow_move_assignable_v<borrow_type> &&
+      std::is_nothrow_move_constructible_v<T> &&
+      // NOLINTNEXTLINE(*-noexcept-move-*)
+      std::is_nothrow_destructible_v<T> &&
+      std::is_nothrow_destructible_v<borrow_type>) {
     if (this == &rhs) {
       return *this;
     }
@@ -157,25 +164,27 @@ class MaybeOwned final {
         isBorrowed_ = false;
       }
     }
-    TORCH_INTERNAL_ASSERT_DEBUG_ONLY(isBorrowed_ == rhs.isBorrowed_);
     return *this;
   }
 
-  static MaybeOwned borrowed(const T& t) {
+  static MaybeOwned borrowed(const T& t C10_LIFETIMEBOUND) {
     return MaybeOwned(t);
   }
 
   static MaybeOwned owned(T&& t) noexcept(
-      std::is_nothrow_move_constructible<T>::value) {
+      std::is_nothrow_move_constructible_v<T>) {
     return MaybeOwned(std::move(t));
   }
 
   template <class... Args>
-  static MaybeOwned owned(in_place_t, Args&&... args) {
-    return MaybeOwned(in_place, std::forward<Args>(args)...);
+  static MaybeOwned owned(std::in_place_t /*unused*/, Args&&... args) {
+    return MaybeOwned(std::in_place, std::forward<Args>(args)...);
   }
 
-  ~MaybeOwned() {
+  ~MaybeOwned() noexcept(
+      // NOLINTNEXTLINE(*-noexcept-destructor)
+      std::is_nothrow_destructible_v<T> &&
+      std::is_nothrow_destructible_v<borrow_type>) {
     if (C10_UNLIKELY(!isBorrowed_)) {
       own_.~T();
     } else {

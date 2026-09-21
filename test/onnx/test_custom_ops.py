@@ -1,63 +1,18 @@
 # Owner(s): ["module: onnx"]
 
-import caffe2.python.onnx.backend as c2
-import numpy as np
-import onnx
 import onnx_test_common
 import pytorch_test_common
+
 import torch
 import torch.utils.cpp_extension
-from test_pytorch_onnx_caffe2 import do_export
 from torch.onnx import symbolic_helper
 from torch.testing._internal import common_utils
-
-
-class TestCustomOps(pytorch_test_common.ExportTestCase):
-    def test_custom_add(self):
-        op_source = """
-        #include <torch/script.h>
-
-        torch::Tensor custom_add(torch::Tensor self, torch::Tensor other) {
-          return self + other;
-        }
-
-        static auto registry =
-          torch::RegisterOperators("custom_namespace::custom_add", &custom_add);
-        """
-
-        torch.utils.cpp_extension.load_inline(
-            name="custom_add",
-            cpp_sources=op_source,
-            is_python_module=False,
-            verbose=True,
-        )
-
-        class CustomAddModel(torch.nn.Module):
-            def forward(self, a, b):
-                return torch.ops.custom_namespace.custom_add(a, b)
-
-        def symbolic_custom_add(g, self, other):
-            return g.op("Add", self, other)
-
-        torch.onnx.register_custom_op_symbolic(
-            "custom_namespace::custom_add", symbolic_custom_add, 9
-        )
-
-        x = torch.randn(2, 3, 4, requires_grad=False)
-        y = torch.randn(2, 3, 4, requires_grad=False)
-
-        model = CustomAddModel()
-        # before fixing #51833 this used to give a PyBind error
-        # with PyTorch 1.10dev ("Unable to cast from non-held to held
-        # instance (T& to Holder<T>)")
-        onnxir, _ = do_export(model, (x, y), opset_version=11)
-        onnx_model = onnx.ModelProto.FromString(onnxir)
-        prepared = c2.prepare(onnx_model)
-        caffe2_out = prepared.run(inputs=[x.cpu().numpy(), y.cpu().numpy()])
-        np.testing.assert_array_equal(caffe2_out[0], model(x, y).cpu().numpy())
+from torch.testing._internal.common_utils import HardwareClassification
 
 
 class TestCustomAutogradFunction(pytorch_test_common.ExportTestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     opset_version = 9
     keep_initializers_as_inputs = False
     onnx_shape_inference = True
@@ -74,7 +29,7 @@ class TestCustomAutogradFunction(pytorch_test_common.ExportTestCase):
                 return g.op("Clip", input, min_f=scalar)
 
         class MyModule(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.clip = MyClip.apply
 
@@ -86,7 +41,7 @@ class TestCustomAutogradFunction(pytorch_test_common.ExportTestCase):
         model = MyModule()
         onnx_test_common.run_model_test(self, model, input_args=(x,))
 
-    def test_register_custom_op(self):
+    def test_register_op(self):
         class MyClip(torch.autograd.Function):
             @staticmethod
             def forward(ctx, input, scalar):
@@ -100,7 +55,7 @@ class TestCustomAutogradFunction(pytorch_test_common.ExportTestCase):
                 return input.clamp(min=0)
 
         class MyModule(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.clip = MyClip.apply
                 self.relu = MyRelu.apply
@@ -110,13 +65,12 @@ class TestCustomAutogradFunction(pytorch_test_common.ExportTestCase):
                 h = self.relu(h)
                 return h
 
-        def symbolic_pythonop(ctx: torch.onnx.SymbolicContext, g, *args, **kwargs):
-            n = ctx.cur_node
+        def symbolic_pythonop(g, *args, **kwargs):
             name = kwargs["name"]
             if name == "MyClip":
-                return g.op("Clip", args[0], min_f=args[1], outputs=n.outputsSize())
+                return g.op("Clip", args[0], min_f=args[1])
             elif name == "MyRelu":
-                return g.op("Relu", args[0], outputs=n.outputsSize())
+                return g.op("Relu", args[0])
             else:
                 return symbolic_helper._unimplemented(
                     "prim::PythonOp", "unknown node kind: " + name
@@ -132,20 +86,22 @@ class TestCustomAutogradFunction(pytorch_test_common.ExportTestCase):
 
 
 class TestExportAsContribOps(pytorch_test_common.ExportTestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     opset_version = 14
     keep_initializers_as_inputs = False
     onnx_shape_inference = True
 
     def test_contrib_op_with_loop(self):
         class M(torch.nn.Module):
-            def __init__(self):
+            def __init__(self) -> None:
                 super().__init__()
                 self.gelu = torch.nn.GELU(approximate="none")
 
             def forward(self, x):
                 res = []
                 res2 = []
-                for i in range(x.size(0)):
+                for _ in range(x.size(0)):
                     if len(res) > 0:
                         res2.append(res[0])
                     else:

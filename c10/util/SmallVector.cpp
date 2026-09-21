@@ -102,7 +102,7 @@ static size_t getNewCapacity(size_t MinSize, size_t TSize, size_t OldCapacity) {
   // In theory 2*capacity can overflow if the capacity is 64 bit, but the
   // original capacity would never be large enough for this to be a problem.
   size_t NewCapacity = 2 * OldCapacity + 1; // Always grow.
-  return std::min(std::max(NewCapacity, MinSize), MaxSize);
+  return std::clamp(NewCapacity, MinSize, MaxSize);
 }
 
 // Note: Moving this function into the header may cause performance regression.
@@ -112,6 +112,7 @@ void* SmallVectorBase<Size_T>::mallocForGrow(
     size_t TSize,
     size_t& NewCapacity) {
   NewCapacity = getNewCapacity<Size_T>(MinSize, TSize, this->capacity());
+  // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
   auto Result = std::malloc(NewCapacity * TSize);
   if (Result == nullptr) {
     throw std::bad_alloc();
@@ -122,12 +123,13 @@ void* SmallVectorBase<Size_T>::mallocForGrow(
 // Note: Moving this function into the header may cause performance regression.
 template <class Size_T>
 void SmallVectorBase<Size_T>::grow_pod(
-    void* FirstEl,
+    const void* FirstEl,
     size_t MinSize,
     size_t TSize) {
   size_t NewCapacity = getNewCapacity<Size_T>(MinSize, TSize, this->capacity());
-  void* NewElts;
+  void* NewElts = nullptr;
   if (BeginX == FirstEl) {
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
     NewElts = std::malloc(NewCapacity * TSize);
     if (NewElts == nullptr) {
       throw std::bad_alloc();
@@ -137,6 +139,7 @@ void SmallVectorBase<Size_T>::grow_pod(
     memcpy(NewElts, this->BeginX, size() * TSize);
   } else {
     // If this wasn't grown from the inline copy, grow the allocated space.
+    // NOLINTNEXTLINE(cppcoreguidelines-no-malloc)
     NewElts = std::realloc(this->BeginX, NewCapacity * TSize);
     if (NewElts == nullptr) {
       throw std::bad_alloc();

@@ -16,8 +16,7 @@
  * types, to avoid leaking those details to PyTorch clients.
  */
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 /// Maps file names to file contents.
 using ExtraFilesMap = std::unordered_map<std::string, std::string>;
@@ -33,15 +32,15 @@ class TORCH_API DetachedBuffer final {
       : data_(data), size_(size), data_owner_(internal_data_owner) {}
 
   /// Returns a pointer to the data.
-  C10_NODISCARD void* data() {
+  [[nodiscard]] void* data() {
     return data_;
   }
   /// Returns a pointer to the data.
-  C10_NODISCARD const void* data() const {
+  [[nodiscard]] const void* data() const {
     return data_;
   }
   /// Returns the size of the data, in bytes.
-  C10_NODISCARD size_t size() const {
+  [[nodiscard]] size_t size() const {
     return size_;
   }
 
@@ -83,11 +82,11 @@ TORCH_API DetachedBuffer::UniqueDetachedBuffer save_mobile_module_to_bytes(
     const ExtraFilesMap& jit_sources = ExtraFilesMap(),
     const std::vector<IValue>& jit_constants = {});
 
-// This function will make the capabilities to load and safe
-// Module as a flatbuffer file available for use by _load_for_mobile
-// and friends. This is NOT needed if using the other functions
-// in this file directly.
+TORCH_API void save_mobile_module_to_func(
+    const mobile::Module& module,
+    const std::function<size_t(const void*, size_t)>& writer_func);
+
+// TODO(qihan): delete
 TORCH_API bool register_flatbuffer_serializer();
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

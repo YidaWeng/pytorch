@@ -1,8 +1,7 @@
 #include <test/cpp/jit/test_utils.h>
 
-#include <gtest/gtest.h>
-
 #include <c10/core/TensorOptions.h>
+#include <gtest/gtest.h>
 #include <torch/csrc/autograd/generated/variable_factories.h>
 #include <torch/csrc/jit/api/module.h>
 #include <torch/csrc/jit/frontend/resolver.h>
@@ -17,7 +16,6 @@
 #include <torch/csrc/jit/mobile/parse_operators.h>
 #include <torch/csrc/jit/mobile/upgrader_mobile.h>
 #include <torch/csrc/jit/serialization/export.h>
-#include <torch/csrc/jit/serialization/flatbuffer_serializer_jit.h>
 #include <torch/csrc/jit/serialization/import.h>
 #include <torch/custom_class.h>
 #include <torch/torch.h>
@@ -410,7 +408,7 @@ class TorchBindLiteInterpreterTestStruct
     ss << "Hello! Your tensor has ";
     ss << t.numel();
     ss << " elements!";
-    return ss.str();
+    return std::move(ss).str();
   }
 };
 
@@ -543,10 +541,8 @@ TEST(LiteInterpreterTest, GetRuntimeOperatorsVersion) {
  * build/run does).
  */
 TEST(LiteInterpreterTest, GetByteCodeVersion) {
-  std::string filePath(__FILE__);
   auto test_model_file_v4 =
-      filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file_v4.append("script_module_v4.ptl");
+      resolveTestDataFile(__FILE__, "script_module_v4.ptl");
 
   auto version_v4 = _get_model_bytecode_version(test_model_file_v4);
   AT_ASSERT(version_v4 == 4);
@@ -680,7 +676,6 @@ void backportAllVersionCheck(
 
 #if !defined FB_XPLAT_BUILD
 TEST(LiteInterpreterTest, BackPortByteCodeModelAllVersions) {
-  torch::jit::register_flatbuffer_all();
   torch::jit::Module module("m");
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
   module.register_parameter("weight", torch::ones({20, 1, 5, 5}), false);
@@ -896,7 +891,7 @@ TEST(LiteInterpreterTest, FindWrongMethodName) {
   std::stringstream ss;
   m._save_for_mobile(ss);
   mobile::Module bc = _load_for_mobile(ss);
-  ASSERT_TRUE(bc.find_method("forward") == c10::nullopt);
+  ASSERT_TRUE(bc.find_method("forward") == std::nullopt);
 }
 
 TEST(LiteInterpreterTest, FindAndRunMethod) {
@@ -920,7 +915,7 @@ TEST(LiteInterpreterTest, FindAndRunMethod) {
   for (int i = 0; i < 3; ++i) {
     auto bcinputs = inputs;
     auto method = bc.find_method("add_it");
-    AT_ASSERT(method != c10::nullopt);
+    AT_ASSERT(method != std::nullopt);
     res = (*method)(std::move(bcinputs));
   }
 
@@ -998,7 +993,7 @@ TEST(LiteInterpreterTest, ExtraFiles) {
   extra_files["mobile_info.json"] = "{\"key\": 23}";
   module->_save_for_mobile(oss, extra_files);
 
-  std::istringstream iss(oss.str());
+  std::istringstream iss(std::move(oss).str());
   std::unordered_map<std::string, std::string> loaded_extra_files;
   loaded_extra_files["metadata.json"] = "";
   torch::jit::_load_for_mobile(iss, torch::kCPU, loaded_extra_files);
@@ -1017,6 +1012,20 @@ TEST(LiteInterpreterTest, ExtraFiles) {
   torch::jit::_load_for_mobile(iss, torch::kCPU, loaded_extra_files);
   ASSERT_EQ(loaded_extra_files["metadata.json"], "abc");
   ASSERT_EQ(loaded_extra_files["mobile_info.json"], "{\"key\": 23}");
+
+  std::unordered_map<std::string, std::string>
+      loaded_extra_files_without_explicit_mapping;
+  iss.seekg(0, iss.beg);
+  torch::jit::_load_for_mobile(
+      iss,
+      torch::kCPU,
+      loaded_extra_files_without_explicit_mapping,
+      MobileModuleLoadOptions::PARSE_ALL_EXTRA_FILE_MAPS);
+  ASSERT_EQ(
+      loaded_extra_files_without_explicit_mapping["metadata.json"], "abc");
+  ASSERT_EQ(
+      loaded_extra_files_without_explicit_mapping["mobile_info.json"],
+      "{\"key\": 23}");
 }
 
 TEST(LiteInterpreterTest, OpNameExportFetchRootOperators) {
@@ -1087,7 +1096,7 @@ TEST(RunTimeTest, ParseBytecode) {
 
   //  class Module(torch.nn.Module):
   //
-  //    def __init__(self):
+  //    def __init__(self) -> None:
   //      super().__init__()
   //
   //    def forward(self, x: int, h: int, xfirst: bool):
@@ -1158,8 +1167,8 @@ TEST(RunTimeTest, ParseOperator) {
   // PyTorch program:
 
   // class Add(torch.nn.Module):
-  //     def __init__(self):
-  //         super(Add, self).__init__()
+  //     def __init__(self) -> None:
+  //         super().__init__()
 
   //     def forward(self, a, b):
   //         return a + b
@@ -1659,9 +1668,8 @@ TEST(LiteInterpreterTest, OperatorTest2) { // NOLINT (use =delete in gtest)
 #if !defined FB_XPLAT_BUILD
 // The following test run in fbcode only
 TEST(LiteInterpreterUpgraderTest, DivTensorV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append("upgrader_models/test_versioned_div_tensor_v2.ptl");
+  auto test_model_file = resolveTestDataFile(
+      __FILE__, "upgrader_models/test_versioned_div_tensor_v2.ptl");
   /*
   (('__torch__.MyModule.forward',
     (('instructions',
@@ -1706,10 +1714,8 @@ TEST(LiteInterpreterUpgraderTest, DivTensorV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivTensorOutV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
-      "upgrader_models/test_versioned_div_tensor_out_v2.ptl");
+  auto test_model_file = resolveTestDataFile(
+      __FILE__, "upgrader_models/test_versioned_div_tensor_out_v2.ptl");
   /*
   (('__torch__.MyModule.forward',
     (('instructions',
@@ -1748,10 +1754,8 @@ TEST(LiteInterpreterUpgraderTest, DivTensorOutV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivTensorInplaceV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
-      "upgrader_models/test_versioned_div_tensor_inplace_v2.ptl");
+  auto test_model_file = resolveTestDataFile(
+      __FILE__, "upgrader_models/test_versioned_div_tensor_inplace_v2.ptl");
   /*
   (('__torch__.MyModule.forward',
     (('instructions',
@@ -1787,10 +1791,8 @@ TEST(LiteInterpreterUpgraderTest, DivTensorInplaceV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivScalarFloatV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
-      "upgrader_models/test_versioned_div_scalar_float_v2.ptl");
+  auto test_model_file = resolveTestDataFile(
+      __FILE__, "upgrader_models/test_versioned_div_scalar_float_v2.ptl");
   /*
   (('__torch__.MyModuleFloat.forward',
     (('instructions',
@@ -1827,9 +1829,8 @@ TEST(LiteInterpreterUpgraderTest, DivScalarFloatV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivScalarReciprocalFloatV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
+  auto test_model_file = resolveTestDataFile(
+      __FILE__,
       "upgrader_models/test_versioned_div_scalar_reciprocal_float_v2.ptl");
   /*
   (('__torch__.MyModuleFloat.forward',
@@ -1868,9 +1869,8 @@ TEST(LiteInterpreterUpgraderTest, DivScalarReciprocalFloatV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivScalarReciprocalIntV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
+  auto test_model_file = resolveTestDataFile(
+      __FILE__,
       "upgrader_models/test_versioned_div_scalar_reciprocal_int_v2.ptl");
   /*
   (('__torch__.MyModuleInt.forward',
@@ -1908,10 +1908,8 @@ TEST(LiteInterpreterUpgraderTest, DivScalarReciprocalIntV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivScalarScalarV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
-      "upgrader_models/test_versioned_div_scalar_scalar_v2.ptl");
+  auto test_model_file = resolveTestDataFile(
+      __FILE__, "upgrader_models/test_versioned_div_scalar_scalar_v2.ptl");
   /*
   (('__torch__.MyModule.forward',
     (('instructions',
@@ -1962,10 +1960,8 @@ TEST(LiteInterpreterUpgraderTest, DivScalarScalarV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivScalarIntV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
-      "upgrader_models/test_versioned_div_scalar_int_v2.ptl");
+  auto test_model_file = resolveTestDataFile(
+      __FILE__, "upgrader_models/test_versioned_div_scalar_int_v2.ptl");
   /*
   (('__torch__.MyModuleInt.forward',
     (('instructions',
@@ -2001,9 +1997,8 @@ TEST(LiteInterpreterUpgraderTest, DivScalarIntV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivScalarInplaceFloatV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
+  auto test_model_file = resolveTestDataFile(
+      __FILE__,
       "upgrader_models/test_versioned_div_scalar_inplace_float_v2.ptl");
   /*
   (('__torch__.MyModuleFloat.forward',
@@ -2041,10 +2036,8 @@ TEST(LiteInterpreterUpgraderTest, DivScalarInplaceFloatV2) {
 }
 
 TEST(LiteInterpreterUpgraderTest, DivScalarInplaceIntV2) {
-  std::string filePath(__FILE__);
-  auto test_model_file = filePath.substr(0, filePath.find_last_of("/\\") + 1);
-  test_model_file.append(
-      "upgrader_models/test_versioned_div_scalar_inplace_int_v2.ptl");
+  auto test_model_file = resolveTestDataFile(
+      __FILE__, "upgrader_models/test_versioned_div_scalar_inplace_int_v2.ptl");
   /*
   (('__torch__.MyModuleInt.forward',
     (('instructions',
@@ -2191,8 +2184,6 @@ class LiteInterpreterDynamicTypeTestFixture
   static constexpr size_t kNumSplits = 10;
 };
 
-constexpr size_t LiteInterpreterDynamicTypeTestFixture::kNumSplits;
-
 /**
  * Enumerate all possible JIT types appearing in mobile runtime, and test
  * whether subtyping relation is preserved after one of the JIT types is
@@ -2219,7 +2210,7 @@ TEST_P(LiteInterpreterDynamicTypeTestFixture, Conformance) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     PyTorch,
     LiteInterpreterDynamicTypeTestFixture,
     ::testing::Range(

@@ -5,7 +5,7 @@
 
 #if !AT_MKLDNN_ENABLED()
 
-namespace at { namespace native {
+namespace at::native {
 
 Tensor mkldnn_prelu(const Tensor& input, const Tensor& weight) {
   TORCH_CHECK(false, "mkldnn_prelu: ATen not compiled with MKLDNN support");
@@ -15,14 +15,14 @@ std::tuple<Tensor, Tensor> mkldnn_prelu_backward(const Tensor& grad_output, cons
   TORCH_CHECK(false, "mkldnn_prelu_backward: ATen not compiled with MKLDNN support");
 }
 
-}}
+}
 
 #else // AT_MKLDNN_ENABLED
 
 #include <ATen/native/mkldnn/MKLDNNCommon.h>
 #include <ATen/native/mkldnn/Utils.h>
 
-namespace at { namespace native {
+namespace at::native {
 
 Tensor mkldnn_prelu(const Tensor& input, const Tensor& weight) {
   if (input.scalar_type() == ScalarType::BFloat16) {
@@ -30,13 +30,6 @@ Tensor mkldnn_prelu(const Tensor& input, const Tensor& weight) {
         "mkldnn_relu: bf16 path needs the cpu support avx512bw, avx512vl and avx512dq");
   }
 
-  int64_t weight_num = weight.numel();
-  if (weight_num != 1) {
-    int64_t channel_size = input.dim() > 1 ? input.size(1) : 1;
-    TORCH_CHECK(channel_size == weight_num,
-      "Mismatch of parameter numbers and input channel size. Found parameter numbers = ", weight_num,
-      " and channel size = ", channel_size, ".");
-  }
   const ideep::tensor& x = itensor_from_mkldnn(input);
   const ideep::tensor& w = itensor_from_tensor(weight);
 
@@ -74,6 +67,6 @@ std::tuple<Tensor, Tensor> mkldnn_prelu_backward(const Tensor& grad_output, cons
                                                 weight.options().device_opt())));
   }
 }
-}}
+}
 
 #endif // AT_MKLDNN_ENABLED

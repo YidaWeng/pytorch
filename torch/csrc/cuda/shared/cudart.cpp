@@ -7,12 +7,11 @@
 #include <hip/hip_runtime_api.h>
 #endif
 
+#include <ATen/core/CachingHostAllocator.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 
-namespace torch {
-namespace cuda {
-namespace shared {
+namespace torch::cuda::shared {
 
 #ifdef USE_ROCM
 namespace {
@@ -29,15 +28,6 @@ void initCudartBindings(PyObject* module) {
 
   // By splitting the names of these objects into two literals we prevent the
   // HIP rewrite rules from changing these names when building with HIP.
-
-#if !defined(USE_ROCM)
-  py::enum_<cudaOutputMode_t>(
-      cudart,
-      "cuda"
-      "OutputMode")
-      .value("KeyValuePair", cudaKeyValuePair)
-      .value("CSV", cudaCSV);
-#endif
 
   py::enum_<cudaError_t>(
       cudart,
@@ -71,45 +61,68 @@ void initCudartBindings(PyObject* module) {
       "cuda"
       "HostRegister",
       [](uintptr_t ptr, size_t size, unsigned int flags) -> cudaError_t {
-        return C10_CUDA_ERROR_HANDLED(
-            cudaHostRegister((void*)ptr, size, flags));
+        cudaError_t err;
+        {
+          py::gil_scoped_release no_gil;
+          err = C10_CUDA_ERROR_HANDLED(
+              // NOLINTNEXTLINE(performance-no-int-to-ptr)
+              cudaHostRegister((void*)ptr, size, flags));
+        }
+        // Record after re-acquiring the GIL so that Python traceback
+        // capture in maybeGatherContext() succeeds.
+        if (err == cudaSuccess) {
+          if (auto* host_alloc = at::getHostAllocator(at::kCUDA)) {
+            // NOLINTNEXTLINE(performance-no-int-to-ptr)
+            host_alloc->record_external_register((void*)ptr, size);
+          }
+        }
+        return err;
       });
   cudart.def(
       "cuda"
       "HostUnregister",
       [](uintptr_t ptr) -> cudaError_t {
-        return C10_CUDA_ERROR_HANDLED(cudaHostUnregister((void*)ptr));
+        cudaError_t err;
+        {
+          py::gil_scoped_release no_gil;
+          // NOLINTNEXTLINE(performance-no-int-to-ptr)
+          err = C10_CUDA_ERROR_HANDLED(cudaHostUnregister((void*)ptr));
+        }
+        if (err == cudaSuccess) {
+          if (auto* host_alloc = at::getHostAllocator(at::kCUDA)) {
+            // NOLINTNEXTLINE(performance-no-int-to-ptr)
+            host_alloc->record_external_unregister((void*)ptr);
+          }
+        }
+        return err;
       });
   cudart.def(
       "cuda"
       "StreamCreate",
       [](uintptr_t ptr) -> cudaError_t {
+        py::gil_scoped_release no_gil;
+        // NOLINTNEXTLINE(performance-no-int-to-ptr)
         return C10_CUDA_ERROR_HANDLED(cudaStreamCreate((cudaStream_t*)ptr));
       });
   cudart.def(
       "cuda"
       "StreamDestroy",
       [](uintptr_t ptr) -> cudaError_t {
+        py::gil_scoped_release no_gil;
+        // NOLINTNEXTLINE(performance-no-int-to-ptr)
         return C10_CUDA_ERROR_HANDLED(cudaStreamDestroy((cudaStream_t)ptr));
       });
-#if !defined(USE_ROCM)
-  cudart.def(
-      "cuda"
-      "ProfilerInitialize",
-      cudaProfilerInitialize);
-#endif
   cudart.def(
       "cuda"
       "MemGetInfo",
-      [](int device) -> std::pair<size_t, size_t> {
+      [](c10::DeviceIndex device) -> std::pair<size_t, size_t> {
         c10::cuda::CUDAGuard guard(device);
         size_t device_free = 0;
         size_t device_total = 0;
+        py::gil_scoped_release no_gil;
         C10_CUDA_CHECK(cudaMemGetInfo(&device_free, &device_total));
         return {device_free, device_total};
       });
 }
 
-} // namespace shared
-} // namespace cuda
-} // namespace torch
+} // namespace torch::cuda::shared

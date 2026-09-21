@@ -1,7 +1,6 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/core/Tensor.h>
 #include <ATen/Dispatch.h>
-#include <ATen/TensorUtils.h>
 
 #include <ATen/native/im2col.h>
 #include <ATen/native/im2col_shape_check.h>
@@ -13,7 +12,6 @@
 #else
 #include <ATen/ops/col2im_native.h>
 #include <ATen/ops/empty_like.h>
-#include <ATen/ops/im2col_native.h>
 #endif
 
 // Note [im2col/col2im output padding]
@@ -68,11 +66,10 @@
 //
 // ALSO do vol2col
 
-namespace at {
-namespace native {
+namespace at::native {
 namespace {
 
-static void col2im_out_cpu_template(
+void col2im_out_cpu_template(
     Tensor& output,
     const Tensor& input_,
     IntArrayRef output_size,
@@ -145,7 +142,7 @@ static void col2im_out_cpu_template(
 
   output.resize_({batch_size, n_output_plane, output_height, output_width});
 
-  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND2(kBFloat16, kHalf,
+  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES_AND3(kBFloat16, kHalf, kBool,
       input.scalar_type(), "col2im_out_cpu", [&] {
         Tensor input_n = Tensor();
         Tensor output_n = Tensor();
@@ -164,7 +161,7 @@ static void col2im_out_cpu_template(
           output_n = output.select(0, elt);
 
           col2im<scalar_t>(
-              input_n.data_ptr<scalar_t>(),
+              input_n.const_data_ptr<scalar_t>(),
               n_output_plane,
               output_height,
               output_width,
@@ -178,7 +175,7 @@ static void col2im_out_cpu_template(
               stride_width,
               dilation_height,
               dilation_width,
-              output_n.data_ptr<scalar_t>());
+              output_n.mutable_data_ptr<scalar_t>());
         }
 
         if (!batched_input) {
@@ -215,5 +212,4 @@ Tensor col2im_cpu(
   return output;
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native

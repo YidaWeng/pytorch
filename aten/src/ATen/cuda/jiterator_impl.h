@@ -3,18 +3,18 @@
 
 #if AT_USE_JITERATOR()
 
-#include <c10/util/variant.h>
 #include <ATen/native/TensorIterator.h>
 #include <ATen/cuda/detail/OffsetCalculator.cuh>
 #include <ATen/native/cuda/jit_utils.h>
 #include <ATen/native/cuda/MemoryAccess.cuh>
 #include <ATen/native/cuda/JitLoops.cuh>
 
+#include <array>
 #include <string>
+#include <variant>
 #include <vector>
 
-namespace at {
-namespace native {
+namespace at::native {
 
 
 #define AT_FOR_8_CASES(_)  \
@@ -39,7 +39,7 @@ namespace native {
 
 c10::SmallVector<std::string> get_extra_args_typenames(const c10::SmallVector<at::Scalar>& extra_args) {
   c10::SmallVector<std::string> args_typenames(extra_args.size());
-  for (auto i = 0; i < extra_args.size(); ++i) {
+  for (const auto i : c10::irange(extra_args.size())) {
     args_typenames[i] = at::cuda::jit::typeName(extra_args[i].type());
   }
   return args_typenames;
@@ -48,9 +48,11 @@ c10::SmallVector<std::string> get_extra_args_typenames(const c10::SmallVector<at
 int can_vectorize_up_to(at::ScalarType type, char* pointer) {
   switch(type) {
 #define DEFINE_CASE(ctype, scalartype)                                   \
-    case ScalarType::scalartype : return memory::can_vectorize_up_to<ctype>(pointer);
+    case scalartype : return memory::can_vectorize_up_to<ctype>(pointer);
 
-    AT_FORALL_SCALAR_TYPES_WITH_COMPLEX(DEFINE_CASE)
+    AT_FORALL_SCALAR_TYPES_V2(
+      AT_WRAP(DEFINE_CASE),
+      AT_EXPAND(AT_ALL_SCALAR_TYPES_WITH_COMPLEX))
 #undef DEFINE_CASE
 
     default: TORCH_INTERNAL_ASSERT(false, "Unrecognized ScalarType: ", type);
@@ -94,7 +96,7 @@ static std::unique_ptr<OffsetCalculator<N>> make_unique_offset_calculator(
 template <bool IS_INPUT>
 struct OffsetCalculatorVariant {
 #define DEFINE_CASE(index) std::unique_ptr<OffsetCalculator<index>>
-  using OffsetCalculatorTypes = c10::variant<
+  using OffsetCalculatorTypes = std::variant<
     AT_FOR_8_CASES_WITH_COMMA(DEFINE_CASE)
   >;
 #undef DEFINE_CASE
@@ -114,17 +116,17 @@ struct OffsetCalculatorVariant {
   }
 
   void* data_ptr() {
-    return c10::visit([](auto & v){ return static_cast<void*>(v.get()); }, v);
+    return std::visit([](auto & v){ return static_cast<void*>(v.get()); }, v);
   }
 
  private:
-  OffsetCalculatorTypes v;
+  OffsetCalculatorTypes v{};
 };
 
 struct ArrayVariant {
 // works for up to 8 input + 8 outputs
-#define DEFINE_CASE(index) at::detail::Array<char*, index>, at::detail::Array<char*, index+8>
-  using ArrayTypes = c10::variant<
+#define DEFINE_CASE(index) std::array<char*, index>, std::array<char*, index+8>
+  using ArrayTypes = std::variant<
     AT_FOR_8_CASES_WITH_COMMA(DEFINE_CASE)
   >;
 #undef DEFINE_CASE
@@ -133,8 +135,8 @@ struct ArrayVariant {
     int ntensors = iter.ntensors();
     switch(ntensors) {
 #define DEFINE_CASE(index)                                            \
-      case index: array = at::detail::Array<char*, index>{}; break;   \
-      case index+8: array = at::detail::Array<char*, index+8>{}; break;
+      case index: array = std::array<char*, index>{}; break;   \
+      case index+8: array = std::array<char*, index+8>{}; break;
 
       AT_FOR_8_CASES(DEFINE_CASE)
 #undef DEFINE_CASE
@@ -143,7 +145,7 @@ struct ArrayVariant {
         TORCH_CHECK(false, "ArrayVariant is not implemented for ntensors = ", ntensors);
     }
 
-    c10::visit([&](auto& a) {
+    std::visit([&](auto& a) {
       for (auto i = 0; i < ntensors; ++i) {
         a[i] = (char*)iter.data_ptr(i);
       }
@@ -151,7 +153,7 @@ struct ArrayVariant {
   }
 
   void* data_ptr() {
-    return c10::visit([](auto & a){ return static_cast<void*>(&a); }, array);
+    return std::visit([](auto & a){ return static_cast<void*>(&a); }, array);
   }
 
 private:
@@ -160,7 +162,7 @@ private:
 
 struct TrivialOffsetCalculatorVariant {
 #define DEFINE_CASE(index) TrivialOffsetCalculator<index>
-  using TrivialOffsetCalculatorTypes = c10::variant<
+  using TrivialOffsetCalculatorTypes = std::variant<
     AT_FOR_8_CASES_WITH_COMMA(DEFINE_CASE)
   >;
 #undef DEFINE_CASE
@@ -179,16 +181,16 @@ struct TrivialOffsetCalculatorVariant {
   }
 
   void* data_ptr() {
-    return c10::visit([](auto & v){ return static_cast<void*>(&v); }, v);
+    return std::visit([](auto & v){ return static_cast<void*>(&v); }, v);
   }
 
 private:
-  TrivialOffsetCalculatorTypes v;
+  TrivialOffsetCalculatorTypes v{};
 };
 
 struct LoadWithCastVariant {
 #define DEFINE_CASE(index) std::unique_ptr<memory::LoadWithCast<index>>
-  using LoadWithCastPtr = c10::variant<
+  using LoadWithCastPtr = std::variant<
     AT_FOR_8_CASES_WITH_COMMA(DEFINE_CASE)
   >;
 #undef DEFINE_CASE
@@ -208,16 +210,16 @@ struct LoadWithCastVariant {
   }
 
   void* data_ptr() {
-    return c10::visit([](auto & v){ return static_cast<void*>(v.get()); }, v);
+    return std::visit([](auto & v){ return static_cast<void*>(v.get()); }, v);
   }
 
 private:
-  LoadWithCastPtr v;
+  LoadWithCastPtr v{};
 };
 
 struct StoreWithCastVariant {
 #define DEFINE_CASE(index) std::unique_ptr<memory::StoreWithCast<index>>
-  using StoreWithCastPtr = c10::variant<
+  using StoreWithCastPtr = std::variant<
     AT_FOR_8_CASES_WITH_COMMA(DEFINE_CASE)
   >;
 #undef DEFINE_CASE
@@ -237,14 +239,14 @@ struct StoreWithCastVariant {
   }
 
   void* data_ptr() {
-    return c10::visit([](auto & v){ return static_cast<void*>(v.get()); }, v);
+    return std::visit([](auto & v){ return static_cast<void*>(v.get()); }, v);
   }
 
 private:
-  StoreWithCastPtr v;
+  StoreWithCastPtr v{};
 };
 
-}} // namespace at::native
+} // namespace at::native
 
 
 #endif // AT_USE_JITERATOR()

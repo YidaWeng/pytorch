@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ATen/TensorMeta.h>
-#include <ATen/core/Dimname.h>
 #include <ATen/core/Range.h>
 #include <ATen/core/TensorBase.h>
 #include <c10/core/DynamicCast.h>
@@ -14,18 +13,9 @@
 #include <array>
 #include <bitset>
 
-C10_CLANG_DIAGNOSTIC_PUSH()
-#if C10_CLANG_HAS_WARNING("-Wshorten-64-to-32")
-C10_CLANG_DIAGNOSTIC_IGNORE("-Wshorten-64-to-32")
-#endif
-#if C10_CLANG_HAS_WARNING("-Wdeprecated-copy-dtor")
-C10_CLANG_DIAGNOSTIC_IGNORE("-Wdeprecated-copy-dtor")
-#endif
-
 namespace at {
 class Tensor;
 class OptionalTensorRef;
-using NameVector = SmallVector<Dimname, kDimVectorStaticSize>;
 } // namespace at
 
 // TensorIterator is a helper class for element-wise operations, such as
@@ -87,10 +77,15 @@ constexpr int64_t GRAIN_SIZE = 32768;
 
 // Storage for a non-owning Tensor, without needing to include Tensor.h
 class TORCH_API OpaqueOptionalTensorRef {
-  alignas(alignof(TensorBase)) std::array<char, sizeof(TensorBase)> data_;
+  alignas(alignof(TensorBase)) std::array<char, sizeof(TensorBase)> data_{};
 
  public:
   OpaqueOptionalTensorRef();
+  OpaqueOptionalTensorRef(const OpaqueOptionalTensorRef&) = default;
+  OpaqueOptionalTensorRef& operator=(const OpaqueOptionalTensorRef&) = default;
+  OpaqueOptionalTensorRef(OpaqueOptionalTensorRef&&) noexcept = default;
+  OpaqueOptionalTensorRef& operator=(OpaqueOptionalTensorRef&&) noexcept =
+      default;
   ~OpaqueOptionalTensorRef();
 
   OptionalTensorRef* get() {
@@ -130,7 +125,15 @@ struct TORCH_API OperandInfo {
     validate();
   }
 
+  C10_ALWAYS_INLINE OperandInfo(const OperandInfo&) = default;
+  C10_ALWAYS_INLINE OperandInfo& operator=(const OperandInfo&) = default;
+  C10_ALWAYS_INLINE OperandInfo(OperandInfo&&) noexcept = default;
+  C10_ALWAYS_INLINE OperandInfo& operator=(OperandInfo&&) noexcept = default;
   C10_ALWAYS_INLINE ~OperandInfo() = default;
+
+  /// The data pointer. This may be different from tensor->data_ptr() if the
+  /// iterator is split.
+  void* data = nullptr;
 
   /// Stride after broadcasting. The stride is in bytes, not number of elements.
   StrideVector stride_bytes;
@@ -142,7 +145,7 @@ struct TORCH_API OperandInfo {
   /// promotion target_dtype value can become different from tensor's dtype
   /// also, during type promotion target_dtype and device can be set for an
   /// undefined tensor so that tensor can be properly constructed later.
-  c10::optional<Device> device = c10::nullopt;
+  std::optional<Device> device = std::nullopt;
   ScalarType target_dtype = ScalarType::Undefined;
   // Caches dtype of the tensor, because scalar_type is an expensive operation
   // If dtype of the tensor is changed (e.g. as a result of type promotion or in
@@ -160,15 +163,24 @@ struct TORCH_API OperandInfo {
     return TensorOptions(target_dtype).device(device);
   }
 
-  /// The data pointer. This may be different from tensor->data_ptr() if the
-  /// iterator is split.
-  void* data = nullptr;
-
   bool is_output = false;
 
+  // will_resize is only for output tensor.
+  // 1) Functional call(like torch.add(self, other)): output tensor is
+  //    undefined, and pytorch creates a new tensor by using common shape
+  //    and computed stride in TensorIterator;
+  // 2) Inplace call(like torch.add_(self, other)): output tensor is same
+  //    with input tensor, and can't to modify tensor's size and stride;
+  // 3) Op call with output(like torch.add(self, other, out = output)):
+  //    output tensor is defined, but tensor shape maybe different with common
+  //    shape. If tensor shape is not same with common shape, this output
+  //    tensor will be resized by using common shape and computed stride in
+  //    TensorIterator. Otherwise can't modify tensor's size and stride.
   bool will_resize = false;
 
   bool is_read_write = false;
+
+  bool is_const = false;
 
   void validate() {
     TORCH_CHECK(
@@ -209,7 +221,7 @@ struct TORCH_API OperandInfo {
  private:
   c10::MaybeOwned<TensorBase> tensor_base_;
   c10::MaybeOwned<TensorBase> original_tensor_base_ =
-      c10::MaybeOwned<TensorBase>::owned(c10::in_place);
+      c10::MaybeOwned<TensorBase>::owned(std::in_place);
 
   // We store TensorBase visibly in the header to allow inline access.
   // However, we sometimes need a genuine `const Tensor &` for the
@@ -236,8 +248,7 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   using PtrVector = SmallVector<char*, 4>;
   using StrideVector = SmallVector<int64_t, 6>;
 
-  TensorIteratorBase();
-  void build(TensorIteratorConfig&);
+  void build(TensorIteratorConfig& /*config*/);
 
   // The inner-loop function operates on the fastest moving dimension. It
   // implements element-wise operations in terms of 1-d strided tensors.
@@ -257,14 +268,14 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   void foreach_reduced_elt(loop_subiter_t loop, bool parallelize = true);
 
   int ndim() const {
-    return shape_.size();
+    return static_cast<int>(shape_.size());
   }
   IntArrayRef shape() const {
     return shape_;
   }
   int64_t numel() const;
   int ntensors() const {
-    return operands_.size();
+    return static_cast<int>(operands_.size());
   }
   int noutputs() const {
     return num_outputs_;
@@ -290,11 +301,11 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   bool is_dim_reduced(int dim) const;
 
   /// Accessors for each operand
-  IntArrayRef strides(int arg) const {
+  IntArrayRef strides(int64_t arg) const {
     return operands_[arg].stride_bytes;
   }
-  void* data_ptr(int arg) const;
-  ScalarType dtype(int arg = 0) const {
+  void* data_ptr(int64_t arg) const;
+  ScalarType dtype(int64_t arg = 0) const {
     return operands_[arg].current_dtype;
   }
   ScalarType common_dtype() const {
@@ -303,43 +314,55 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
         "Queried for invalid common dtype!");
     return common_dtype_;
   }
-  ScalarType input_dtype(int arg = 0) const {
+  // common_dtype() is populated whenever TensorIterator could infer a single
+  // computation dtype -- this includes both the promotion flags and the
+  // simpler case where every input already shares a dtype. nullopt means
+  // "no single dtype was inferred", not "promotion was not requested".
+  // Callers that don't know whether a common dtype was inferred can use
+  // this predicate instead of catching the assertion above.
+  std::optional<ScalarType> maybe_common_dtype() const {
+    return common_dtype_ == ScalarType::Undefined
+        ? std::nullopt
+        : std::optional<ScalarType>(common_dtype_);
+  }
+  ScalarType input_dtype(int64_t arg = 0) const {
     return operands_[num_outputs_ + arg].current_dtype;
   }
-  Device device(int arg = 0) const {
+  Device device(int64_t arg = 0) const {
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     return operands_[arg].device.value();
   }
-  DeviceType device_type(int arg = 0) const {
+  c10::DeviceType device_type(int64_t arg = 0) const {
     return device(arg).type();
   }
-  int64_t element_size(int arg) const {
-    return elementSize(dtype(arg));
+  int64_t element_size(int64_t arg) const {
+    return static_cast<int64_t>(elementSize(dtype(arg)));
   }
-  bool is_scalar(int arg) const;
-  bool is_cpu_scalar(int arg) const;
+  bool is_scalar(int64_t arg) const;
+  bool is_cpu_scalar(int64_t arg) const;
 
-  const TensorBase& tensor_base(int arg) const {
+  const TensorBase& tensor_base(int64_t arg) const {
     return operands_[arg].tensor_base();
   }
-  const Tensor& tensor(int arg) const {
+  const Tensor& tensor(int64_t arg) const {
     return operands_[arg].tensor();
   }
 
-  const TensorBase& output_base(int arg = 0) const {
+  const TensorBase& output_base(int64_t arg = 0) const {
     AT_ASSERT(arg < num_outputs_);
     return tensor_base(arg);
   }
 
-  const Tensor& output(int arg = 0) const {
+  const Tensor& output(int64_t arg = 0) const {
     AT_ASSERT(arg < num_outputs_);
     return tensor(arg);
   }
 
-  const TensorBase& input_base(int arg = 0) const {
+  const TensorBase& input_base(int64_t arg = 0) const {
     AT_ASSERT(arg >= 0 && arg < ntensors() - num_outputs_);
     return tensor_base(num_outputs_ + arg);
   }
-  const Tensor& input(int arg = 0) const {
+  const Tensor& input(int64_t arg = 0) const {
     AT_ASSERT(arg >= 0 && arg < ntensors() - num_outputs_);
     return tensor(num_outputs_ + arg);
   }
@@ -349,7 +372,7 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   void cast_outputs();
 
   /// Removes an operand from this iterator
-  void remove_operand(int arg);
+  void remove_operand(int64_t arg);
   /// Shrinks an iterated dimension
   void narrow(int dim, int64_t start, int64_t size);
   /// Narrows every dim after and including `start_dim` to size one.
@@ -357,7 +380,7 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   /// Replaces the data pointer for the operand at index `arg`.
   /// The new pointer should have the same sizes, strides and dtype as the
   /// original
-  void unsafe_replace_operand(int arg, void* data);
+  void unsafe_replace_operand(int64_t arg, void* data);
 
   /// Splits this TensorIterator into two iterators. Together they iterate over
   /// the entire operation. Used by `with_32bit_indexing()`.
@@ -367,9 +390,27 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   int get_dim_to_split() const;
 
   template <typename T>
-  T scalar_value(int arg) {
+  T scalar_value(int64_t arg) {
     auto& op = operands_[arg];
     return c10::fetch_and_cast<T>(op.tensor_base().scalar_type(), op.data);
+  }
+
+  /// Return scalar value from original_tensor_base if it is defined. When
+  /// common_dtype is Half, casting scalar input to common_dtype might overflow.
+  /// If the scalar is already given in the type of Half, then return scalar
+  /// value from tensor_base.
+  template <typename T>
+  T original_scalar_value(int64_t arg) {
+    auto& original_tensor_base = operands_[arg].original_tensor_base();
+    if (original_tensor_base.defined()) {
+      TORCH_INTERNAL_ASSERT(
+          original_tensor_base.scalar_type() != common_dtype());
+      return c10::fetch_and_cast<T>(
+          original_tensor_base.scalar_type(),
+          original_tensor_base.const_data_ptr());
+    } else {
+      return scalar_value<T>(arg);
+    }
   }
 
  private:
@@ -395,10 +436,10 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   template <
       typename loop1d_t,
       std::enable_if_t<
-          std::is_convertible<
+          std::is_convertible_v<
               loop1d_t,
               c10::function_ref<
-                  void(char**, const int64_t* strides, int64_t size)>>::value,
+                  void(char**, const int64_t* strides, int64_t size)>>,
           int> = 0>
   void for_each(loop1d_t loop, int64_t grain_size = at::internal::GRAIN_SIZE) {
     for_each(loop_2d_from_1d(loop), grain_size);
@@ -411,10 +452,10 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   template <
       typename loop1d_t,
       std::enable_if_t<
-          std::is_convertible<
+          std::is_convertible_v<
               loop1d_t,
               c10::function_ref<
-                  void(char**, const int64_t* strides, int64_t size)>>::value,
+                  void(char**, const int64_t* strides, int64_t size)>>,
           int> = 0>
   void serial_for_each(loop1d_t loop, Range range) {
     serial_for_each(loop_2d_from_1d(loop), range);
@@ -425,7 +466,7 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   /// Create a strides array for a Tensor with shape of this iterator. The
   /// parameter `element_size` specifies the size of Tensor's data type in
   /// bytes (e.g. `4` for `float`)
-  StrideVector compatible_stride(int element_size) const;
+  StrideVector compatible_stride(int64_t element_size) const;
 
   /// Inverts the re-ordering done by reorder_dimensions. This can only be
   /// called *before* coalesce_dimensions() is called.
@@ -444,18 +485,27 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   PtrVector get_base_ptrs() const;
 
   // Helper functions for advanced stride manipulations (e.g. torch.flip)
-  void _unsafe_set_arg_strides(const int arg, IntArrayRef strides) {
-    operands_[arg].stride_bytes = std::move(strides);
+  void _unsafe_set_arg_strides(const int64_t arg, IntArrayRef strides) {
+    operands_[arg].stride_bytes = strides;
   }
-  void _unsafe_set_arg_data(const int arg, void* data) {
+  void _unsafe_set_arg_data(const int64_t arg, void* data) {
     operands_[arg].data = data;
+  }
+
+  // Helper functions for custom device, custom device can get OperandInfo in
+  // their side.
+  const OperandInfo& operand(int arg = 0) const {
+    return operands_[arg];
+  }
+  OperandInfo& operand(int arg = 0) {
+    return operands_[arg];
   }
 
   /// true if the stride computation can use 32-bit arithmetic. Used by GPU
   /// kernels
   bool can_use_32bit_indexing() const;
 
-  /// An "iteratable" object that recursively splits this iterator into
+  /// An "iterable" object that recursively splits this iterator into
   /// sub-iterators that can use 32-bit indexing.
   SplitUntil32Bit with_32bit_indexing() const;
 
@@ -490,8 +540,7 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
       int64_t output_idx,
       IntArrayRef sizes,
       IntArrayRef strides,
-      TensorOptions options,
-      DimnameList names) override;
+      TensorOptions options) override;
 
 #define TORCH_DISALLOW_TEMPORARIES_IMPL(methodname, maybestatic)            \
   maybestatic void methodname(                                              \
@@ -571,21 +620,19 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
 #undef TORCH_DISALLOW_TEMPORARIES
  protected:
   // Mutable reference as it moves tensors out of TensorIteratorConfig
-  void populate_operands(TensorIteratorConfig&);
+  void populate_operands(TensorIteratorConfig& /*config*/);
   void mark_outputs();
-  void mark_resize_outputs(const TensorIteratorConfig&);
-  void compute_mem_overlaps(const TensorIteratorConfig&);
-  void compute_shape(const TensorIteratorConfig&);
-  void compute_strides(const TensorIteratorConfig&);
+  void mark_resize_outputs(const TensorIteratorConfig& /*config*/);
+  void compute_mem_overlaps(const TensorIteratorConfig& /*config*/);
+  void compute_shape(const TensorIteratorConfig& /*config*/);
+  void compute_strides(const TensorIteratorConfig& /*config*/);
   void reorder_dimensions();
   void permute_dimensions(IntArrayRef perm);
-  void compute_types(const TensorIteratorConfig&);
+  void compute_types(const TensorIteratorConfig& /*config*/);
   ScalarType compute_common_dtype();
   void allocate_or_resize_outputs();
-  bool fast_set_up(const TensorIteratorConfig&);
-  FastSetupType compute_fast_setup_type(const TensorIteratorConfig&);
-  void compute_names(const TensorIteratorConfig&);
-  void propagate_names_to_outputs();
+  bool fast_set_up(const TensorIteratorConfig& /*config*/);
+  FastSetupType compute_fast_setup_type(const TensorIteratorConfig& /*config*/);
   void coalesce_dimensions();
 
  protected:
@@ -641,9 +688,6 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
   /// when you make sub-TensorIterators).
   DimVector view_offsets_;
 
-  /// The computed names of the output tensor.  Computed by compute_names()
-  NameVector names_;
-
   /// The operands of the TensorIterator: both the inputs and outputs.  The
   /// outputs MUST come first in the operands_ list.  There is always an
   /// operand for each output of the TensorIterator, even if TensorIterator
@@ -687,7 +731,7 @@ struct TORCH_API TensorIteratorBase : public impl::MetaBase {
 };
 
 struct TORCH_API TensorIterator final : public TensorIteratorBase {
-  TensorIterator() : TensorIteratorBase() {}
+  TensorIterator() = default;
   // Slicing is OK, TensorIterator guaranteed NOT to have any fields
   TensorIterator(const TensorIteratorBase& iter) : TensorIteratorBase(iter) {}
 
@@ -729,8 +773,7 @@ struct TORCH_API TensorIterator final : public TensorIteratorBase {
       int64_t output_idx,
       IntArrayRef sizes,
       IntArrayRef strides,
-      TensorOptions options,
-      DimnameList names) override;
+      TensorOptions options) override;
 };
 
 class TORCH_API TensorIteratorConfig final {
@@ -738,9 +781,12 @@ class TORCH_API TensorIteratorConfig final {
   friend struct TensorIteratorBase;
   friend struct TensorIterator;
 
-  TensorIteratorConfig() {}
+  TensorIteratorConfig() = default;
 
   C10_DISABLE_COPY_AND_ASSIGN(TensorIteratorConfig);
+  TensorIteratorConfig(TensorIteratorConfig&&) = default;
+  TensorIteratorConfig& operator=(TensorIteratorConfig&&) = default;
+  ~TensorIteratorConfig() = default;
 
   /// Construction
   // Stores input/output Tensors without incrementing the reference count.
@@ -751,10 +797,14 @@ class TORCH_API TensorIteratorConfig final {
   TensorIteratorConfig& add_input(const TensorBase& input) {
     return add_borrowed_input(input);
   }
+  TensorIteratorConfig& add_const_input(const TensorBase& input) {
+    return add_borrowed_const_input(input);
+  }
 
   // Borrowing from temporaries is unlikely to go well.
   TensorIteratorConfig& add_output(TensorBase&& output) = delete;
   TensorIteratorConfig& add_input(TensorBase&& input) = delete;
+  TensorIteratorConfig& add_const_input(TensorBase&& input) = delete;
 
   // Stores input/output Tensors while incrementing the reference count.
   // Note that add_{in,out}put are nearly always what you
@@ -762,6 +812,7 @@ class TORCH_API TensorIteratorConfig final {
   // compile.
   TensorIteratorConfig& add_owned_output(const TensorBase& output);
   TensorIteratorConfig& add_owned_input(const TensorBase& input);
+  TensorIteratorConfig& add_owned_const_input(const TensorBase& input);
 
   // Advanced API: stores input/output Tensors without incrementing
   // the reference count. The caller must ensure that these Tensors
@@ -770,10 +821,12 @@ class TORCH_API TensorIteratorConfig final {
   // Important: the outputs have to be added before the inputs.
   TensorIteratorConfig& add_borrowed_output(const TensorBase& output);
   TensorIteratorConfig& add_borrowed_input(const TensorBase& input);
+  TensorIteratorConfig& add_borrowed_const_input(const TensorBase& input);
 
   // Borrowing from temporaries is unlikely to go well.
   TensorIteratorConfig& add_borrowed_output(TensorBase&& output) = delete;
   TensorIteratorConfig& add_borrowed_input(TensorBase&& input) = delete;
+  TensorIteratorConfig& add_borrowed_const_input(TensorBase&& input) = delete;
 
   // Sets the check_mem_overlap_ flag, which is true by default.
   // If true, inputs are checked for partial overlap with the outputs and
@@ -821,7 +874,7 @@ class TORCH_API TensorIteratorConfig final {
 
   // Sets the enforce_linear_iteration_ flag, which is false by default.
   // If true, iteration goes in the same order as a C-contiguous tensor
-  // is layed out in memory. i.e. last dimension iterates fastest.
+  // is laid out in memory. i.e. last dimension iterates fastest.
   //
   // This iteration order can be less efficient and may even prevent
   // vectorization. So only use if the correctness of your kernel depends on it.
@@ -915,9 +968,9 @@ class TORCH_API TensorIteratorConfig final {
   int num_outputs_ = 0;
   int num_inputs_ = 0;
 
-  c10::optional<DimVector> static_shape_ = c10::nullopt;
-  c10::optional<ScalarType> static_dtype_ = c10::nullopt;
-  c10::optional<Device> static_device_ = c10::nullopt;
+  std::optional<DimVector> static_shape_ = std::nullopt;
+  std::optional<ScalarType> static_dtype_ = std::nullopt;
+  std::optional<Device> static_device_ = std::nullopt;
   bool check_mem_overlap_ = true;
   bool allow_cpu_scalars_ = false;
   bool is_reduction_ = false;
@@ -929,16 +982,21 @@ class TORCH_API TensorIteratorConfig final {
   bool promote_inputs_to_common_dtype_ = false;
   bool promote_integer_inputs_to_float_ = false;
   bool cast_common_dtype_to_outputs_ = false;
+
+  SmallVector<size_t, 4> const_tensor_indices_;
 };
 
 /// A container-like struct that acts as if it contains splits of a
 /// TensorIterator that can use 32-bit indexing. Taken together the splits cover
 /// the original TensorIterator.
 struct TORCH_API SplitUntil32Bit {
+  // NOLINTNEXTLINE(cppcoreguidelines-special-member-functions)
   struct TORCH_API iterator {
-    iterator(){};
+    iterator() = default;
     iterator(const TensorIteratorBase& iter);
     iterator(iterator&&) = default;
+    iterator& operator=(iterator&&) = default;
+    ~iterator() = default;
 
     // Guaranteed to be a TensorIterator proper!
     TensorIterator& operator*() const;
@@ -963,9 +1021,8 @@ struct TORCH_API SplitUntil32Bit {
   iterator end() const;
 
  private:
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
   const TensorIteratorBase& iter;
 };
 
 } // namespace at
-
-C10_CLANG_DIAGNOSTIC_POP()

@@ -1,46 +1,19 @@
 #pragma once
 
-#include <c10/core/Backend.h>
 #include <c10/util/ArrayRef.h>
 #include <c10/util/Exception.h>
 
-#include <ostream>
+#include <torch/headeronly/core/MemoryFormat.h>
 
-// Memory format is not the property of a Tensor. It is the way to tell an
-// operator how the result should be organized in memory and nothing more. That
-// means memory format should never be used as return value for any tensor state
-// interrogation functions (internally and externally).
-//
-// Possible options are:
-//  Preserve:
-//    If any of the input tensors is in channels_last format, operator output
-//    should be in channels_last format
-//
-//  Contiguous:
-//    Regardless of input tensors format, the output should be contiguous
-//    Tensor.
-//
-//  ChannelsLast:
-//    Regardless of input tensors format, the output should be in channels_last
-//    format.
+#include <cstdint>
+#include <vector>
 
 namespace c10 {
-enum class MemoryFormat : int8_t {
-  Contiguous,
-  Preserve,
-  ChannelsLast,
-  ChannelsLast3d,
-  NumOptions
-};
 
 // If you are seeing this, it means that this call site was not checked if
 // the memory format could be preserved, and it was switched to old default
 // behaviour of contiguous
 #define LEGACY_CONTIGUOUS_MEMORY_FORMAT c10::get_contiguous_memory_format()
-
-inline MemoryFormat get_contiguous_memory_format() {
-  return MemoryFormat::Contiguous;
-}
 
 inline std::ostream& operator<<(
     std::ostream& stream,
@@ -54,6 +27,7 @@ inline std::ostream& operator<<(
       return stream << "ChannelsLast";
     case MemoryFormat::ChannelsLast3d:
       return stream << "ChannelsLast3d";
+    case MemoryFormat::NumOptions:
     default:
       TORCH_CHECK(false, "Unknown memory format ", memory_format);
   }
@@ -61,8 +35,9 @@ inline std::ostream& operator<<(
 
 // Note: Hardcoded the channel last stride indices here to get better
 // performance
-inline std::vector<int64_t> get_channels_last_strides_2d(IntArrayRef sizes) {
-  std::vector<int64_t> strides(sizes.size());
+template <typename T>
+inline std::vector<T> get_channels_last_strides_2d(ArrayRef<T> sizes) {
+  std::vector<T> strides(sizes.size());
   switch (sizes.size()) {
     case 4:
       strides[1] = 1;
@@ -81,8 +56,13 @@ inline std::vector<int64_t> get_channels_last_strides_2d(IntArrayRef sizes) {
   }
 }
 
-inline std::vector<int64_t> get_channels_last_strides_3d(IntArrayRef sizes) {
-  std::vector<int64_t> strides(sizes.size());
+inline std::vector<int64_t> get_channels_last_strides_2d(IntArrayRef sizes) {
+  return get_channels_last_strides_2d<int64_t>(sizes);
+}
+
+template <typename T>
+std::vector<T> get_channels_last_strides_3d(ArrayRef<T> sizes) {
+  std::vector<T> strides(sizes.size());
   switch (sizes.size()) {
     case 5:
       strides[1] = 1;
@@ -101,6 +81,10 @@ inline std::vector<int64_t> get_channels_last_strides_3d(IntArrayRef sizes) {
       TORCH_INTERNAL_ASSERT(
           false, "ChannelsLast3d doesn't support size ", sizes.size());
   }
+}
+
+inline std::vector<int64_t> get_channels_last_strides_3d(IntArrayRef sizes) {
+  return get_channels_last_strides_3d<int64_t>(sizes);
 }
 
 // NOTE:
@@ -239,6 +223,7 @@ inline bool is_channels_last_strides_2d(
   switch (sizes.size()) {
     case 4:
       return is_channels_last_strides_2d_s4(sizes, strides);
+      // NOLINTNEXTLINE(bugprone-branch-clone)
     case 3:
       // TODO dim == 3 case will be enabled once it is fully tested
       return false;
@@ -254,6 +239,7 @@ inline bool is_channels_last_strides_3d(
   switch (sizes.size()) {
     case 5:
       return is_channels_last_strides_3d_s5(sizes, strides);
+      // NOLINTNEXTLINE(bugprone-branch-clone)
     case 4:
       // TODO dim == 4 case will be enabled once it is fully tested
       return false;

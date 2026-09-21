@@ -1,6 +1,5 @@
 #include <torch/csrc/utils/invalid_arguments.h>
 
-#include <torch/csrc/utils/memory.h>
 #include <torch/csrc/utils/python_strings.h>
 
 #include <c10/util/irange.h>
@@ -18,12 +17,17 @@ std::string py_typename(PyObject* object) {
 }
 
 struct Type {
+  Type() = default;
+  Type(const Type&) = default;
+  Type& operator=(const Type&) = default;
+  Type(Type&&) noexcept = default;
+  Type& operator=(Type&&) noexcept = default;
   virtual bool is_matching(PyObject* object) = 0;
   virtual ~Type() = default;
 };
 
 struct SimpleType : public Type {
-  SimpleType(std::string& name) : name(name){};
+  SimpleType(std::string& name) : name(name) {}
 
   bool is_matching(PyObject* object) override {
     return py_typename(object) == name;
@@ -34,7 +38,7 @@ struct SimpleType : public Type {
 
 struct MultiType : public Type {
   MultiType(std::initializer_list<std::string> accepted_types)
-      : types(accepted_types){};
+      : types(accepted_types) {}
 
   bool is_matching(PyObject* object) override {
     auto it = std::find(types.begin(), types.end(), py_typename(object));
@@ -45,10 +49,10 @@ struct MultiType : public Type {
 };
 
 struct NullableType : public Type {
-  NullableType(std::unique_ptr<Type> type) : type(std::move(type)){};
+  NullableType(std::unique_ptr<Type> type) : type(std::move(type)) {}
 
   bool is_matching(PyObject* object) override {
-    return object == Py_None || type->is_matching(object);
+    return Py_IsNone(object) || type->is_matching(object);
   }
 
   std::unique_ptr<Type> type;
@@ -56,7 +60,7 @@ struct NullableType : public Type {
 
 struct TupleType : public Type {
   TupleType(std::vector<std::unique_ptr<Type>> types)
-      : types(std::move(types)){};
+      : types(std::move(types)) {}
 
   bool is_matching(PyObject* object) override {
     if (!PyTuple_Check(object))
@@ -75,7 +79,7 @@ struct TupleType : public Type {
 };
 
 struct SequenceType : public Type {
-  SequenceType(std::unique_ptr<Type> type) : type(std::move(type)){};
+  SequenceType(std::unique_ptr<Type> type) : type(std::move(type)) {}
 
   bool is_matching(PyObject* object) override {
     if (!PySequence_Check(object))
@@ -95,7 +99,7 @@ struct SequenceType : public Type {
 
 struct Argument {
   Argument(std::string name, std::unique_ptr<Type> type)
-      : name(std::move(name)), type(std::move(type)){};
+      : name(std::move(name)), type(std::move(type)) {}
 
   std::string name;
   std::unique_ptr<Type> type;
@@ -105,14 +109,14 @@ struct Option {
   Option(std::vector<Argument> arguments, bool is_variadic, bool has_out)
       : arguments(std::move(arguments)),
         is_variadic(is_variadic),
-        has_out(has_out){};
+        has_out(has_out) {}
   Option(bool is_variadic, bool has_out)
-      : arguments(), is_variadic(is_variadic), has_out(has_out){};
+      : is_variadic(is_variadic), has_out(has_out) {}
   Option(const Option&) = delete;
-  Option(Option&& other)
-      : arguments(std::move(other.arguments)),
-        is_variadic(other.is_variadic),
-        has_out(other.has_out){};
+  Option(Option&& other) noexcept = default;
+  Option& operator=(const Option&) = delete;
+  Option& operator=(Option&&) = delete;
+  ~Option() = default;
 
   std::vector<Argument> arguments;
   bool is_variadic;
@@ -124,8 +128,7 @@ std::vector<std::string> _splitString(
     const std::string& delim) {
   std::vector<std::string> tokens;
   size_t start = 0;
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-  size_t end;
+  size_t end = 0;
   while ((end = s.find(delim, start)) != std::string::npos) {
     tokens.push_back(s.substr(start, end - start));
     start = end + delim.length();
@@ -137,25 +140,25 @@ std::vector<std::string> _splitString(
 std::unique_ptr<Type> _buildType(std::string type_name, bool is_nullable) {
   std::unique_ptr<Type> result;
   if (type_name == "float") {
-    result = torch::make_unique<MultiType>(MultiType{"float", "int", "long"});
+    result = std::make_unique<MultiType>(MultiType{"float", "int", "long"});
   } else if (type_name == "int") {
-    result = torch::make_unique<MultiType>(MultiType{"int", "long"});
-  } else if (type_name.find("tuple[") == 0) {
+    result = std::make_unique<MultiType>(MultiType{"int", "long"});
+  } else if (type_name.starts_with("tuple[")) {
     auto type_list = type_name.substr(6);
     type_list.pop_back();
     std::vector<std::unique_ptr<Type>> types;
     for (auto& type : _splitString(type_list, ","))
       types.emplace_back(_buildType(type, false));
-    result = torch::make_unique<TupleType>(std::move(types));
-  } else if (type_name.find("sequence[") == 0) {
+    result = std::make_unique<TupleType>(std::move(types));
+  } else if (type_name.starts_with("sequence[")) {
     auto subtype = type_name.substr(9);
     subtype.pop_back();
-    result = torch::make_unique<SequenceType>(_buildType(subtype, false));
+    result = std::make_unique<SequenceType>(_buildType(subtype, false));
   } else {
-    result = torch::make_unique<SimpleType>(type_name);
+    result = std::make_unique<SimpleType>(type_name);
   }
   if (is_nullable)
-    result = torch::make_unique<NullableType>(std::move(result));
+    result = std::make_unique<NullableType>(std::move(result));
   return result;
 }
 
@@ -172,17 +175,17 @@ std::pair<Option, std::string> _parseOption(
   /// XXX: this is a hack only for the out arg in TensorMethods
   auto out_pos = printable_option.find('#');
   if (out_pos != std::string::npos) {
-    if (kwargs.count("out") > 0) {
+    if (kwargs.contains("out")) {
       std::string kwonly_part = printable_option.substr(out_pos + 1);
       printable_option.erase(out_pos);
       printable_option += "*, ";
       printable_option += kwonly_part;
     } else if (out_pos >= 2) {
       printable_option.erase(out_pos - 2);
-      printable_option += ")";
+      printable_option += ')';
     } else {
       printable_option.erase(out_pos);
-      printable_option += ")";
+      printable_option += ')';
     }
     has_out = true;
   }
@@ -228,7 +231,7 @@ bool _argcountMatch(
   auto num_expected = option.arguments.size();
   auto num_got = arguments.size() + kwargs.size();
   // Note: variadic functions don't accept kwargs, so it's ok
-  if (option.has_out && kwargs.count("out") == 0)
+  if (option.has_out && !kwargs.contains("out"))
     num_expected--;
   return num_got == num_expected ||
       (option.is_variadic && num_got > num_expected);
@@ -279,9 +282,9 @@ std::string _formattedArgDesc(
       result += py_typename(arg) + " of ";
       auto num_elements = PySequence_Length(arg);
       if (is_tuple) {
-        result += "(";
+        result += '(';
       } else {
-        result += "[";
+        result += '[';
       }
       for (const auto i : c10::irange(num_elements)) {
         if (i != 0) {
@@ -293,11 +296,11 @@ std::string _formattedArgDesc(
       }
       if (is_tuple) {
         if (num_elements == 1) {
-          result += ",";
+          result += ',';
         }
-        result += ")";
+        result += ')';
       } else {
-        result += "]";
+        result += ']';
       }
     } else {
       result += py_typename(arg);
@@ -308,9 +311,9 @@ std::string _formattedArgDesc(
       result += reset_red;
     result += ", ";
   }
-  if (arguments.size() > 0)
+  if (!arguments.empty())
     result.erase(result.length() - 2);
-  result += ")";
+  result += ')';
   return result;
 }
 
@@ -322,9 +325,9 @@ std::string _argDesc(
     result += std::string(py_typename(arg)) + ", ";
   for (auto& kwarg : kwargs)
     result += kwarg.first + "=" + py_typename(kwarg.second) + ", ";
-  if (arguments.size() > 0)
+  if (!arguments.empty())
     result.erase(result.length() - 2);
-  result += ")";
+  result += ')';
   return result;
 }
 
@@ -334,7 +337,7 @@ std::vector<std::string> _tryMatchKwargs(
   std::vector<std::string> unmatched;
   // NOLINTNEXTLINE(cppcoreguidelines-narrowing-conversions,bugprone-narrowing-conversions)
   int64_t start_idx = option.arguments.size() - kwargs.size();
-  if (option.has_out && kwargs.count("out") == 0)
+  if (option.has_out && !kwargs.contains("out"))
     start_idx--;
   if (start_idx < 0)
     start_idx = 0;
@@ -374,13 +377,14 @@ std::string format_invalid_args(
 
   bool has_kwargs = given_kwargs && PyDict_Size(given_kwargs) > 0;
   if (has_kwargs) {
-    // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-    PyObject *key, *value;
+    PyObject *key = nullptr, *value = nullptr;
     Py_ssize_t pos = 0;
 
+    Py_BEGIN_CRITICAL_SECTION(given_kwargs);
     while (PyDict_Next(given_kwargs, &pos, &key, &value)) {
       kwargs.emplace(THPUtils_unpackString(key), value);
     }
+    Py_END_CRITICAL_SECTION();
   }
 
   if (options.size() == 1) {
@@ -390,7 +394,7 @@ std::string format_invalid_args(
     std::vector<std::string> unmatched_kwargs;
     if (has_kwargs)
       unmatched_kwargs = _tryMatchKwargs(option, kwargs);
-    if (unmatched_kwargs.size()) {
+    if (!unmatched_kwargs.empty()) {
       error_msg += "got unrecognized keyword arguments: ";
       for (auto& kwarg : unmatched_kwargs)
         error_msg += kwarg + ", ";
@@ -415,23 +419,23 @@ std::string format_invalid_args(
       auto& printable_option_str = pair.second;
       error_msg += " * ";
       error_msg += printable_option_str;
-      error_msg += "\n";
+      error_msg += '\n';
       if (_argcountMatch(option, args, kwargs)) {
         std::vector<std::string> unmatched_kwargs;
         if (has_kwargs)
           unmatched_kwargs = _tryMatchKwargs(option, kwargs);
-        if (unmatched_kwargs.size() > 0) {
+        if (!unmatched_kwargs.empty()) {
           error_msg +=
               "      didn't match because some of the keywords were incorrect: ";
           for (auto& kwarg : unmatched_kwargs)
             error_msg += kwarg + ", ";
           error_msg.erase(error_msg.length() - 2);
-          error_msg += "\n";
+          error_msg += '\n';
         } else {
           error_msg +=
               "      didn't match because some of the arguments have invalid types: ";
           error_msg += _formattedArgDesc(option, args, kwargs);
-          error_msg += "\n";
+          error_msg += '\n';
         }
       }
     }

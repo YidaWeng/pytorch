@@ -1,20 +1,20 @@
 #include <torch/csrc/jit/passes/concat_opt.h>
 
 #include <algorithm>
+#include <deque>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <torch/csrc/jit/ir/alias_analysis.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/ir/named_value.h>
 #include <torch/csrc/jit/jit_log.h>
-#include <torch/csrc/jit/passes/constant_pooling.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
-#include <torch/csrc/jit/passes/remove_mutation.h>
 #include <torch/csrc/jit/runtime/graph_iterator.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 
@@ -296,7 +296,7 @@ class ConcatExpander {
     auto cat_dim_value = maybe_cat_dim.value();
     auto cat_dim = node->input(1);
 
-    // Set the insertion point to the curent `cat` node.
+    // Set the insertion point to the current `cat` node.
     WithInsertPoint guard(node);
     auto none = graph_->insertConstant(IValue());
     auto one = graph_->insertConstant(1);
@@ -326,7 +326,7 @@ class ConcatExpander {
     //   * Create a slice of `cat` output buffer.
     auto cat_out_value = cat_out_empty->output();
     auto cat_inp_list = node->input(0)->node();
-    int start_idx = 0;
+    int64_t start_idx = 0;
     auto start = graph_->insertConstant(start_idx);
     for (auto cat_inp : cat_inp_list->inputs()) {
       // Create a slice of the cat output buffer that correspond to
@@ -336,8 +336,7 @@ class ConcatExpander {
       TORCH_INTERNAL_ASSERT(cat_inp_tensor_type);
       TORCH_INTERNAL_ASSERT(cat_inp_tensor_type->dim());
       auto cat_inp_tensortype_sizes = cat_inp_tensor_type->sizes();
-      // NOLINTNEXTLINE(bugprone-narrowing-conversions,cppcoreguidelines-narrowing-conversions)
-      int end_idx = start_idx + *cat_inp_tensortype_sizes[cat_dim_value];
+      auto end_idx = start_idx + *cat_inp_tensortype_sizes[cat_dim_value];
       auto end = graph_->insertConstant(end_idx);
 
       auto slice = graph_->create(
@@ -501,11 +500,10 @@ void ExpandConcatAndEliminateRedundancy(const std::shared_ptr<Graph>& graph) {
 namespace {
 
 size_t determineUsageIdx(Value* value, Node* user) {
-  const auto idx =
-      std::find(user->inputs().begin(), user->inputs().end(), value) -
-      user->inputs().begin();
-  TORCH_CHECK(idx != user->inputs().size());
-  return idx;
+  const auto& inputs = user->inputs();
+  const auto it = std::find(inputs.begin(), inputs.end(), value);
+  TORCH_CHECK(it != inputs.end());
+  return std::distance(inputs.begin(), it);
 }
 
 std::vector<Value*> getConcatInputs(Node* concat) {
@@ -518,8 +516,8 @@ std::vector<Value*> getConcatInputs(Node* concat) {
 
 class ConcatCombiner {
  public:
-  explicit ConcatCombiner(std::shared_ptr<Graph> graph)
-      : graph_(std::move(graph)), aliasDb_(graph_) {}
+  ConcatCombiner(std::shared_ptr<Graph> graph, AliasDb& alias_db)
+      : graph_(std::move(graph)), aliasDb_(alias_db) {}
 
   bool run() {
     collectOptimizableConcats();
@@ -684,16 +682,20 @@ class ConcatCombiner {
   std::vector<CombinableConcat> combinable_concats_;
 
   std::shared_ptr<Graph> graph_;
-  AliasDb aliasDb_;
+  AliasDb& aliasDb_;
 };
 
 } // namespace
 
-bool CombineConcats(const std::shared_ptr<Graph>& graph) {
-  bool changed = ConcatCombiner(graph).run();
+bool CombineConcats(const std::shared_ptr<Graph>& graph, AliasDb& alias_db) {
+  bool changed = ConcatCombiner(graph, alias_db).run();
   GRAPH_DUMP("After combining concats", graph);
   return changed;
 }
 
-} // namespace jit
-} // namespace torch
+bool CombineConcats(const std::shared_ptr<Graph>& graph) {
+  AliasDb alias_db(graph);
+  return CombineConcats(graph, alias_db);
+}
+
+} // namespace torch::jit

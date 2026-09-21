@@ -225,7 +225,6 @@ block_diag
 bmm
 cartesian_prod
 chain_matmul
-cholesky
 cholesky_inverse
 cholesky_solve
 cross
@@ -290,7 +289,6 @@ ormqr
 outer
 pca_lowrank
 pinverse
-qr
 renorm
 solve
 svd
@@ -387,7 +385,6 @@ randint
 randint_like
 randn
 randn_like
-randn_like
 random_
 randperm
 range
@@ -422,6 +419,7 @@ l1_loss
 log_softmax
 lp_pool1d
 lp_pool2d
+lp_pool3d
 lstm_cell
 margin_ranking_loss
 max_pool1d_with_indices

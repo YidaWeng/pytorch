@@ -31,8 +31,8 @@
 #include "torch/csrc/jit/frontend/tracer.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "torch/csrc/utils/structseq.h"
-#include "torch/csrc/utils/cuda_lazy_init.h"
-#include "torch/csrc/autograd/python_return_types.h"
+#include "torch/csrc/utils/device_lazy_init.h"
+#include "torch/csrc/autograd/generated/python_return_types.h"
 
 #include <ATen/core/Tensor.h>
 
@@ -59,8 +59,6 @@ using at::TensorOptions;
 using at::IntArrayRef;
 using at::Generator;
 using at::TensorList;
-using at::Dimname;
-using at::DimnameList;
 using at::ArrayRef;
 
 using torch::utils::check_out_type_matches;
@@ -68,7 +66,7 @@ using namespace torch::autograd::utils;
 
 // NOTE: See [Sharded File] comment in VariableType
 
-namespace torch { namespace autograd {
+namespace torch::autograd {
 
 // generated forward declarations start here
 
@@ -90,4 +88,4 @@ void gatherTorchFunctions${shard_id}(std::vector<PyMethodDef> &torch_functions) 
 
 ${py_methods}
 
-}} // namespace torch::autograd
+} // namespace torch::autograd

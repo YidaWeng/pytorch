@@ -1,11 +1,24 @@
 #pragma once
 
-#include <c10/util/ArrayRef.h>
-#include <c10/util/Half.h> // For c10::overflows
+#include <cmath>
+#include <numeric>
 
-#include <ATen/native/vulkan/api/Common.h>
+#include <c10/util/overflows.h>
+
+#include <ATen/native/vulkan/api/vk_api.h>
+
+#include <ATen/native/vulkan/api/Exception.h>
 
 #ifdef USE_VULKAN_API
+
+// Compiler Macros
+
+// Suppress an unused variable. Copied from [[maybe_unused]]
+#if defined(_MSC_VER) && !defined(__clang__)
+#define VK_UNUSED __pragma(warning(suppress : 4100 4101))
+#else
+#define VK_UNUSED __attribute__((__unused__))
+#endif //_MSC_VER
 
 namespace at {
 namespace native {
@@ -14,39 +27,51 @@ namespace api {
 namespace utils {
 
 //
+// Hashing
+//
+
+/**
+ * hash_combine is taken from c10/util/hash.h, which in turn is based on
+ * implementation from Boost
+ */
+inline size_t hash_combine(size_t seed, size_t value) {
+  return seed ^ (value + 0x9e3779b9 + (seed << 6u) + (seed >> 2u));
+}
+
+//
 // Alignment
 //
 
 template <typename Type>
-inline constexpr Type align_down(const Type number, const Type multiple) {
+inline constexpr Type align_down(const Type& number, const Type& multiple) {
   return (number / multiple) * multiple;
 }
 
 template <typename Type>
-inline constexpr Type align_up(const Type number, const Type multiple) {
+inline constexpr Type align_up(const Type& number, const Type& multiple) {
   return align_down(number + multiple - 1, multiple);
 }
 
 template <typename Type>
-inline constexpr Type div_up(const Type numerator, const Type denominator) {
+inline constexpr Type div_up(const Type& numerator, const Type& denominator) {
   return (numerator + denominator - 1) / denominator;
 }
 
 //
-// Cast
+// Casting Utilities
 //
 
 namespace detail {
 
 template <typename To, typename From>
-inline constexpr To safe_downcast(const From v) {
-  TORCH_CHECK(!c10::overflows<To>(v), "Cast failed: out of range!");
+inline constexpr To safe_downcast(const From& v) {
+  VK_CHECK_COND(!c10::overflows<To>(v), "Cast failed: out of range!");
   return static_cast<To>(v);
 }
 
 template <typename To, typename From>
 inline constexpr bool is_signed_to_unsigned() {
-  return std::is_signed<From>::value && std::is_unsigned<To>::value;
+  return std::is_signed_v<From> && std::is_unsigned_v<To>;
 }
 
 } // namespace detail
@@ -55,8 +80,8 @@ template <
     typename To,
     typename From,
     std::enable_if_t<detail::is_signed_to_unsigned<To, From>(), bool> = true>
-inline constexpr To safe_downcast(const From v) {
-  TORCH_CHECK(v >= From{}, "Cast failed: negative signed to unsigned!");
+inline constexpr To safe_downcast(const From& v) {
+  VK_CHECK_COND(v >= From{}, "Cast failed: negative signed to unsigned!");
   return detail::safe_downcast<To, From>(v);
 }
 
@@ -64,18 +89,19 @@ template <
     typename To,
     typename From,
     std::enable_if_t<!detail::is_signed_to_unsigned<To, From>(), bool> = true>
-inline constexpr To safe_downcast(const From v) {
+inline constexpr To safe_downcast(const From& v) {
   return detail::safe_downcast<To, From>(v);
 }
 
 //
-// Vector
+// Vector Types
 //
 
 namespace detail {
 
 template <typename Type, uint32_t N>
 struct vec final {
+  // NOLINTNEXTLINE
   Type data[N];
 };
 
@@ -99,8 +125,35 @@ using vec2 = vec<2u>;
 using vec3 = vec<3u>;
 using vec4 = vec<4u>;
 
-inline ivec2 make_ivec2(IntArrayRef ints, bool reverse = false) {
-  TORCH_CHECK(ints.size() == 2);
+// uvec3 is the type representing tensor extents. Useful for debugging.
+inline std::ostream& operator<<(std::ostream& os, const uvec3& v) {
+  os << '(' << v.data[0u] << ", " << v.data[1u] << ", " << v.data[2u] << ')';
+  return os;
+}
+
+//
+// std::vector<T> Handling
+//
+
+/*
+ * Utility function to perform indexing on an std::vector<T>. Negative indexing
+ * is allowed. For instance, passing an index of -1 will retrieve the last
+ * element. If the requested index is out of bounds, then 1u will be returned.
+ */
+template <typename T>
+inline T val_at(const int64_t index, const std::vector<T>& sizes) {
+  const int64_t ndim = static_cast<int64_t>(sizes.size());
+  if (index >= 0) {
+    return index >= ndim ? 1 : sizes[index];
+  } else {
+    return ndim + index < 0 ? 1 : sizes[ndim + index];
+  }
+}
+
+inline ivec2 make_ivec2(
+    const std::vector<int64_t>& ints,
+    bool reverse = false) {
+  VK_CHECK_COND(ints.size() == 2);
   if (reverse) {
     return {safe_downcast<int32_t>(ints[1]), safe_downcast<int32_t>(ints[0])};
   } else {
@@ -108,8 +161,10 @@ inline ivec2 make_ivec2(IntArrayRef ints, bool reverse = false) {
   }
 }
 
-inline ivec4 make_ivec4(IntArrayRef ints, bool reverse = false) {
-  TORCH_CHECK(ints.size() == 4);
+inline ivec4 make_ivec4(
+    const std::vector<int64_t>& ints,
+    bool reverse = false) {
+  VK_CHECK_COND(ints.size() == 4);
   if (reverse) {
     return {
         safe_downcast<int32_t>(ints[3]),
@@ -127,11 +182,65 @@ inline ivec4 make_ivec4(IntArrayRef ints, bool reverse = false) {
   }
 }
 
+inline ivec4 make_ivec4_prepadded1(const std::vector<int64_t>& ints) {
+  VK_CHECK_COND(ints.size() <= 4);
+
+  ivec4 result = {1, 1, 1, 1};
+  size_t base = 4 - ints.size();
+  for (size_t i = 0; i < ints.size(); ++i) {
+    result.data[i + base] = safe_downcast<int32_t>(ints[i]);
+  }
+
+  return result;
+}
+
 inline ivec3 make_ivec3(uvec3 ints) {
   return {
       safe_downcast<int32_t>(ints.data[0u]),
       safe_downcast<int32_t>(ints.data[1u]),
       safe_downcast<int32_t>(ints.data[2u])};
+}
+
+/*
+ * Given an vector of up to 4 uint64_t representing the sizes of a tensor,
+ * constructs a uvec4 containing those elements in reverse order.
+ */
+inline uvec4 make_whcn_uvec4(const std::vector<int64_t>& arr) {
+  uint32_t w = safe_downcast<uint32_t>(val_at(-1, arr));
+  uint32_t h = safe_downcast<uint32_t>(val_at(-2, arr));
+  uint32_t c = safe_downcast<uint32_t>(val_at(-3, arr));
+  uint32_t n = safe_downcast<uint32_t>(val_at(-4, arr));
+
+  return {w, h, c, n};
+}
+
+/*
+ * Given an vector of up to 4 int64_t representing the sizes of a tensor,
+ * constructs an ivec4 containing those elements in reverse order.
+ */
+inline ivec4 make_whcn_ivec4(const std::vector<int64_t>& arr) {
+  int32_t w = val_at(-1, arr);
+  int32_t h = val_at(-2, arr);
+  int32_t c = val_at(-3, arr);
+  int32_t n = val_at(-4, arr);
+
+  return {w, h, c, n};
+}
+
+/*
+ * Wrapper around std::accumulate that accumulates values of a container of
+ * integral types into int64_t. Taken from `multiply_integers` in
+ * <c10/util/accumulate.h>
+ */
+template <
+    typename C,
+    std::enable_if_t<std::is_integral_v<typename C::value_type>, int> = 0>
+inline int64_t multiply_integers(const C& container) {
+  return std::accumulate(
+      container.begin(),
+      container.end(),
+      static_cast<int64_t>(1),
+      std::multiplies<>());
 }
 
 } // namespace utils
@@ -144,7 +253,7 @@ inline bool operator==(const utils::uvec3& _1, const utils::uvec3& _2) {
 
 inline VkOffset3D create_offset3d(const utils::uvec3& offsets) {
   return VkOffset3D{
-      static_cast<int32_t>(offsets.data[0u]),
+      utils::safe_downcast<int32_t>(offsets.data[0u]),
       static_cast<int32_t>(offsets.data[1u]),
       static_cast<int32_t>(offsets.data[2u])};
 }

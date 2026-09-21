@@ -10,16 +10,15 @@
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #else
-#include <ATen/ops/empty_like.h>
 #include <ATen/ops/ones_like.h>
 #include <ATen/ops/rsqrt.h>
 #include <ATen/ops/zeros_like.h>
 #endif
 
 #include <stack>
+#include <utility>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 std::tuple<at::Tensor, at::Tensor> computeUpdatedConvWeightAndBias(
     const ConvBNParameters& p) {
@@ -103,9 +102,9 @@ void addBiasForConvIfNone(Module& module, const std::string& pattern_name) {
   if (is_floating_point_conv) {
     if (!t->hasAttribute("bias")) {
       auto optional_tensor_type = OptionalType::create(TensorType::get());
-      t->addAttribute("bias", optional_tensor_type, true);
-      auto optional_tensor = c10::optional<at::Tensor>();
-      module.setattr("bias", optional_tensor);
+      t->addAttribute("bias", std::move(optional_tensor_type), true);
+      auto optional_tensor = std::optional<at::Tensor>();
+      module.setattr("bias", std::move(optional_tensor));
       replaceConvBiasWithGetAttr(module);
     }
   }
@@ -119,7 +118,7 @@ class FoldConvBatchNormHelper {
   /**
    * In this step we find all Conv - BatchNorm patterns in the graph
    * and extract the corresponding parameters for these two modules,
-   * and record informations for the modifications of the graph without
+   * and record information for the modifications of the graph without
    * actually performing these modifications.
    */
   void analyze(Module& module, const PatternInfo& pattern);
@@ -279,7 +278,7 @@ void FoldConvBatchNormHelper::analyze(
 
       GRAPH_DEBUG("number of Conv-BatchNorm matches: ", matches.size());
       Graph* g = method.graph().get();
-      if (!conv_bn_paths_.count(g)) {
+      if (!conv_bn_paths_.contains(g)) {
         // This is to make sure we don't visit one graph multiple times
         conv_bn_paths_[g] = {};
         for (const Match& match : matches) {
@@ -310,8 +309,7 @@ void FoldConvBatchNormHelper::analyze(
                 "Conv and BN modules didn't have all required parameters or attributes...");
             continue;
           }
-          conv_bn_paths_[g].push_back(
-              std::make_tuple(conv_module_path, bn_module_path));
+          conv_bn_paths_[g].emplace_back(conv_module_path, bn_module_path);
           // We are using a separate vector for saving Values we want to rewrite
           // to make sure that the order in which we perform these
           // transformations is deterministic. Iterating through keys of
@@ -407,5 +405,4 @@ graph(%self, %input, %conv, %batchnorm):
   return m;
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

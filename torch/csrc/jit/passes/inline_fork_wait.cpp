@@ -1,10 +1,9 @@
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/inline_fork_wait.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
-void InlineForkWait(
+static void InlineForkWait(
     Block* b,
     std::unordered_map<Value*, Value*>& future_remap) {
   auto nodes = b->nodes();
@@ -39,7 +38,7 @@ void InlineForkWait(
       // If the future does not map to a prim::fork, it could be
       // returned from prim::rpc_async, which has side effect, so it shouldn't
       // be dead code eliminated.
-      if (future_remap.count(node->input())) {
+      if (future_remap.contains(node->input())) {
         node->output()->replaceAllUsesWith(future_remap.at(node->input()));
         it.destroyCurrent();
       }
@@ -61,5 +60,4 @@ void InlineForkWait(const std::shared_ptr<Graph>& graph) {
   GRAPH_DUMP("After InlineForkWait: ", graph);
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

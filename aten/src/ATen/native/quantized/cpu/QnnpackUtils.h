@@ -16,7 +16,7 @@
 #endif
 
 #include <utility>
-
+inline int kPaddingChannels = 8;
 struct QnnpackOperatorDeleter {
   void operator()(pytorch_qnnp_operator_t op) {
     pytorch_qnnp_delete_operator(op);
@@ -38,7 +38,7 @@ struct PackedLinearWeightsQnnp : public LinearPackedParamsBase {
       std::unique_ptr<qnnpack::PackBMatrix> w,
       at::Tensor orig_weight,
       at::Tensor bias,
-      c10::optional<double> input_scale,
+      std::optional<double> input_scale,
       at::Tensor w_scales,
       std::vector<uint8_t>&& w_zps)
       : w(std::move(w)),
@@ -47,17 +47,22 @@ struct PackedLinearWeightsQnnp : public LinearPackedParamsBase {
             bias, bias.suggest_memory_format())),
         per_channel_(this->orig_weight.qscheme() == at::kPerChannelAffine),
         input_scale(std::move(input_scale)),
-        w_scales(w_scales),
-        w_zero_points(std::move(w_zps)) {}
+        w_scales(std::move(w_scales)),
+        w_zero_points(std::move(w_zps)),
+        q_scheme(this->orig_weight.qscheme()) {
+    weight_sizes = this->orig_weight.sizes().vec();
+  }
 
   std::unique_ptr<qnnpack::PackBMatrix> w;
   at::Tensor orig_weight;
   at::Tensor bias_;
   bool per_channel_;
-  c10::optional<double> input_scale;
+  std::optional<double> input_scale;
   at::Tensor w_scales;
   std::vector<uint8_t> w_zero_points;
   std::vector<float> requantization_scales;
+  std::vector<int64_t> weight_sizes;
+  c10::QScheme q_scheme;
 
   at::Tensor apply(
       at::Tensor input,
@@ -71,15 +76,15 @@ struct PackedLinearWeightsQnnp : public LinearPackedParamsBase {
   at::Tensor apply_dynamic(at::Tensor input, bool reduce_range=false) override;
   at::Tensor apply_dynamic_relu(at::Tensor input, bool reduce_range=false) override;
 
-  std::tuple<at::Tensor, c10::optional<at::Tensor>> unpack() override;
+  std::tuple<at::Tensor, std::optional<at::Tensor>> unpack() override;
 
-  c10::optional<at::Tensor> bias() override {
+  std::optional<at::Tensor> bias() override {
     return bias_;
   }
 
   static c10::intrusive_ptr<LinearPackedParamsBase> prepack(
       at::Tensor weight,
-      c10::optional<at::Tensor> bias);
+      std::optional<at::Tensor> bias);
 
   bool per_channel() const {
     return per_channel_;
@@ -120,7 +125,7 @@ struct PackedConvWeightsQnnp : public ConvPackedParamsBase<kSpatialDim> {
       torch::List<int64_t> dilation,
       int64_t groups,
       bool transpose,
-      c10::optional<double> input_scale,
+      std::optional<double> input_scale,
       std::vector<int64_t> kernel,
       at::Tensor w_scale,
       std::vector<uint8_t>&& w_zps,
@@ -137,7 +142,7 @@ struct PackedConvWeightsQnnp : public ConvPackedParamsBase<kSpatialDim> {
         is_per_channel_(is_per_channel),
         input_scale(input_scale),
         kernel_(std::move(kernel)),
-        w_scales(w_scale),
+        w_scales(std::move(w_scale)),
         w_zero_points(std::move(w_zps)) {
     const bool any_padding = std::any_of(
         padding_.begin(), padding_.end(), [](const auto& e) { return e != 0; });
@@ -198,8 +203,10 @@ struct PackedConvWeightsQnnp : public ConvPackedParamsBase<kSpatialDim> {
         calloc(1, sizeof(struct pytorch_qnnp_operator)));
     if (convolution == nullptr) {
       TORCH_INTERNAL_ASSERT(
-          false, "failed to allocate %zu bytes for pytorch_qnnp_operator structure",
-          sizeof(struct pytorch_qnnp_operator));
+          false,
+          "failed to allocate ",
+          sizeof(struct pytorch_qnnp_operator),
+          " bytes for pytorch_qnnp_operator structure");
     }
 
     convolution_op =
@@ -273,8 +280,7 @@ struct PackedConvWeightsQnnp : public ConvPackedParamsBase<kSpatialDim> {
     if (zero_buffer == nullptr) {
       pytorch_qnnp_delete_operator(convolution);
       TORCH_INTERNAL_ASSERT(
-          false, "failed to allocate %zu bytes for zero padding",
-          zero_size);
+          false, "failed to allocate ", zero_size, " bytes for zero padding");
     }
     // Need to set to input zero point
     // memset(zero_buffer, input_zero_point, zero_size);
@@ -297,7 +303,7 @@ struct PackedConvWeightsQnnp : public ConvPackedParamsBase<kSpatialDim> {
   int64_t groups_;
   bool transpose_;
   bool is_per_channel_;
-  c10::optional<double> input_scale;
+  std::optional<double> input_scale;
   std::vector<int64_t> kernel_;
   at::Tensor w_scales;
   std::vector<uint8_t> w_zero_points;
@@ -318,11 +324,11 @@ struct PackedConvWeightsQnnp : public ConvPackedParamsBase<kSpatialDim> {
       const at::Tensor& input,
       bool reduce_range=false) override;
 
-  std::tuple<at::Tensor, c10::optional<at::Tensor>> unpack() override;
+  std::tuple<at::Tensor, std::optional<at::Tensor>> unpack() override;
 
   static c10::intrusive_ptr<ConvPackedParamsBase<kSpatialDim>> prepack(
       at::Tensor weight,
-      c10::optional<at::Tensor> bias,
+      std::optional<at::Tensor> bias,
       torch::List<int64_t> stride,
       torch::List<int64_t> padding,
       torch::List<int64_t> output_padding,
@@ -377,26 +383,11 @@ struct PackedConvWeightsQnnp : public ConvPackedParamsBase<kSpatialDim> {
 
 enum class Activation : uint8_t { NONE = 0, RELU = 1 };
 
-#if defined(__ANDROID__) && !defined(__NDK_MAJOR__)
-template <class T>
-inline float Round(const float x) {
-  return ::nearbyintf(x);
-}
-inline double Round(const double x) {
-  return ::nearbyint(x);
-}
-#else
-template <class T>
-inline T Round(const T x) {
-  return std::nearbyint(x);
-}
-#endif
-
 template<typename T>
 inline T QuantizeValue(float scale, int32_t zero_point, float value) {
   const int32_t qmin = std::numeric_limits<T>::min();
   const int32_t qmax = std::numeric_limits<T>::max();
-  auto r = zero_point + static_cast<int32_t>(Round(value / scale));
+  auto r = zero_point + static_cast<int32_t>(std::nearbyint(value / scale));
   r = std::max(r, qmin);
   r = std::min(r, qmax);
   return static_cast<T>(r);
@@ -423,9 +414,7 @@ inline std::pair<T, T> activationLimits(
   }
 }
 
-namespace at {
-namespace native {
-namespace qnnp_avgpool_helper {
+namespace at::native::qnnp_avgpool_helper {
 Tensor qnnpack_avg_pool2d(
     Tensor input,
     IntArrayRef kernel_size,
@@ -433,13 +422,11 @@ Tensor qnnpack_avg_pool2d(
     IntArrayRef padding,
     bool ceil_mode,
     bool count_include_pad,
-    c10::optional<int64_t> divisor_override);
-} // qnnp_avgpool_helper
-} // namespace native
-} // namespace at
+    std::optional<int64_t> divisor_override);
+} // namespace at::native::qnnp_avgpool_helper
 
 namespace {
-C10_UNUSED std::vector<float> generate_requantization_scales(
+[[maybe_unused]] std::vector<float> generate_requantization_scales(
     const at::Tensor& weight_scales,
     const float input_scale,
     const float output_scale,
@@ -447,7 +434,7 @@ C10_UNUSED std::vector<float> generate_requantization_scales(
   // Since weight scale is allocated with padding
   // weight_scales.numel() gives us padded num elements.
   const auto num_output_channels_padded = weight_scales.numel();
-  float *const weight_scales_data = weight_scales.data_ptr<float>();
+  const float *const weight_scales_data = weight_scales.const_data_ptr<float>();
   if (static_cast<int64_t>(requant_scales.size()) < num_output_channels_padded) {
     requant_scales.resize(num_output_channels_padded);
   }
@@ -463,15 +450,15 @@ C10_UNUSED std::vector<float> generate_requantization_scales(
   return requant_scales;
 }
 
-C10_UNUSED std::pair<std::vector<uint8_t>, at::Tensor> make_zero_points_and_scales_tensor(
+[[maybe_unused]] std::pair<std::vector<uint8_t>, at::Tensor>
+make_zero_points_and_scales_tensor(
     const at::Tensor& weight_contig,
     bool transpose = false,
-    uint32_t groups = 1
-  ) {
+    uint32_t groups = 1) {
   const int out_ch_idx = transpose ? 1 : 0;
   const auto num_output_channels = weight_contig.size(out_ch_idx) * (transpose ? groups : 1);
-  // Add 8 to account for bufferring needed by QNNPACK.
-  const auto num_output_channels_padded = num_output_channels + 8;
+  // Add 8 to account for buffering needed by QNNPACK.
+  const auto num_output_channels_padded = num_output_channels + kPaddingChannels;
   const auto qtype = weight_contig.qscheme();
   std::vector<uint8_t> weight_zp(num_output_channels_padded, 0);
   // Adjust weight zero point, similar to weight data.
@@ -484,7 +471,7 @@ C10_UNUSED std::pair<std::vector<uint8_t>, at::Tensor> make_zero_points_and_scal
         weight_contig.q_per_channel_zero_points().scalar_type() == at::kLong,
         "Per channel zero points dtype must be long int.");
     const int64_t* per_channel_zero_points =
-      weight_contig.q_per_channel_zero_points().data_ptr<int64_t>();
+      weight_contig.q_per_channel_zero_points().const_data_ptr<int64_t>();
     for (const auto i : c10::irange(num_output_channels)) {
       weight_zp[i] = (uint8_t)(per_channel_zero_points[i] + 128);
     }

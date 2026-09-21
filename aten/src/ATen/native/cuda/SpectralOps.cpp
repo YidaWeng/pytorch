@@ -1,7 +1,6 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/core/Tensor.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <ATen/Config.h>
 #include <ATen/Dispatch.h>
 #include <ATen/ScalarOps.h>
 #include <ATen/TensorIterator.h>
@@ -10,6 +9,7 @@
 #include <ATen/native/SpectralOpsUtils.h>
 #include <ATen/native/cuda/CuFFTUtils.h>
 #include <ATen/native/cuda/CuFFTPlanCache.h>
+#include <ATen/cuda/nvrtc_stub/ATenNVRTC.h>
 #include <c10/util/irange.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
@@ -21,16 +21,17 @@
 #include <ATen/ops/_fft_r2c_native.h>
 #include <ATen/ops/empty.h>
 #include <ATen/ops/mul.h>
+#include <ATen/ops/view_as_complex.h>
+#include <ATen/ops/view_as_real.h>
 #endif
 
 #include <cufft.h>
 #include <cufftXt.h>
 
 #include <cmath>
-#include <vector>
 
 
-namespace at { namespace native {
+namespace at::native {
 
 using namespace at::native::detail;
 
@@ -38,52 +39,8 @@ using namespace at::native::detail;
 static void exec_cufft_plan(
     const CuFFTConfig &config, void* in_data, void* out_data, bool forward) {
   auto& plan = config.plan();
-#if defined(USE_ROCM)
-  auto value_type = config.data_type();
-  if (value_type == kFloat) {
-    switch (config.transform_type()) {
-      case CuFFTTransformType::C2C: {
-        CUFFT_CHECK(hipfftExecC2C(plan, static_cast<hipfftComplex*>(in_data),
-                                  static_cast<hipfftComplex*>(out_data),
-                                  forward ? HIPFFT_FORWARD : HIPFFT_BACKWARD));
-        return;
-      }
-      case CuFFTTransformType::R2C: {
-        CUFFT_CHECK(hipfftExecR2C(plan, static_cast<hipfftReal*>(in_data),
-                                  static_cast<hipfftComplex*>(out_data)));
-        return;
-      }
-      case CuFFTTransformType::C2R: {
-        CUFFT_CHECK(hipfftExecC2R(plan, static_cast<hipfftComplex*>(in_data),
-                                  static_cast<hipfftReal*>(out_data)));
-        return;
-      }
-    }
-  } else if (value_type == kDouble) {
-    switch (config.transform_type()) {
-      case CuFFTTransformType::C2C: {
-        CUFFT_CHECK(hipfftExecZ2Z(plan, static_cast<hipfftDoubleComplex*>(in_data),
-                                  static_cast<hipfftDoubleComplex*>(out_data),
-                                  forward ? HIPFFT_FORWARD : HIPFFT_BACKWARD));
-        return;
-      }
-      case CuFFTTransformType::R2C: {
-        CUFFT_CHECK(hipfftExecD2Z(plan, static_cast<hipfftDoubleReal*>(in_data),
-                                  static_cast<hipfftDoubleComplex*>(out_data)));
-        return;
-      }
-      case CuFFTTransformType::C2R: {
-        CUFFT_CHECK(hipfftExecZ2D(plan, static_cast<hipfftDoubleComplex*>(in_data),
-                                  static_cast<hipfftDoubleReal*>(out_data)));
-        return;
-      }
-    }
-  }
-  TORCH_CHECK(false, "hipFFT doesn't support transforms on type: ", value_type);
-#else
   CUFFT_CHECK(cufftXtExec(plan, in_data, out_data,
                           forward ? CUFFT_FORWARD : CUFFT_INVERSE));
-#endif
 }
 
 
@@ -133,7 +90,7 @@ static std::vector<std::unique_ptr<CuFFTParamsLRUCache>> plan_caches;
 static std::mutex plan_caches_mutex;
 
 static inline
-CuFFTParamsLRUCache &cufft_get_plan_cache(int64_t device_index) {
+CuFFTParamsLRUCache &cufft_get_plan_cache(DeviceIndex device_index) {
   std::lock_guard<std::mutex> guard(plan_caches_mutex);
 
   AT_ASSERT(device_index >= 0);
@@ -152,36 +109,36 @@ CuFFTParamsLRUCache &cufft_get_plan_cache(int64_t device_index) {
 
 namespace detail {
 
-int64_t cufft_get_plan_cache_max_size_impl(int64_t device_index) {
-  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().getNumGPUs(),
+int64_t cufft_get_plan_cache_max_size_impl(DeviceIndex device_index) {
+  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().deviceCount(),
     "cufft_get_plan_cache_max_size: expected 0 <= device_index < ",
-    at::detail::getCUDAHooks().getNumGPUs(), "], but got device_index=",
+    at::detail::getCUDAHooks().deviceCount(), "], but got device_index=",
     device_index);
   return cufft_get_plan_cache(device_index).max_size();
 }
 
-void cufft_set_plan_cache_max_size_impl(int64_t device_index, int64_t max_size) {
-  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().getNumGPUs(),
+void cufft_set_plan_cache_max_size_impl(DeviceIndex device_index, int64_t max_size) {
+  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().deviceCount(),
     "cufft_set_plan_cache_max_size: expected 0 <= device_index < ",
-    at::detail::getCUDAHooks().getNumGPUs(), "], but got device_index=",
+    at::detail::getCUDAHooks().deviceCount(), "], but got device_index=",
     device_index);
-  return cufft_get_plan_cache(device_index).resize(max_size);
+  cufft_get_plan_cache(device_index).resize(max_size);
 }
 
-int64_t cufft_get_plan_cache_size_impl(int64_t device_index) {
-  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().getNumGPUs(),
+int64_t cufft_get_plan_cache_size_impl(DeviceIndex device_index) {
+  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().deviceCount(),
     "cufft_get_plan_cache_size: expected 0 <= device_index < ",
-    at::detail::getCUDAHooks().getNumGPUs(), "], but got device_index=",
+    at::detail::getCUDAHooks().deviceCount(), "], but got device_index=",
     device_index);
   return cufft_get_plan_cache(device_index).size();
 }
 
-void cufft_clear_plan_cache_impl(int64_t device_index) {
-  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().getNumGPUs(),
+void cufft_clear_plan_cache_impl(DeviceIndex device_index) {
+  TORCH_CHECK(0 <= device_index && device_index < at::detail::getCUDAHooks().deviceCount(),
     "cufft_clear_plan_cache: expected 0 <= device_index < ",
-    at::detail::getCUDAHooks().getNumGPUs(), "], but got device_index=",
+    at::detail::getCUDAHooks().deviceCount(), "], but got device_index=",
     device_index);
-  return cufft_get_plan_cache(device_index).clear();
+  cufft_get_plan_cache(device_index).clear();
 }
 
 } // namespace at::native::detail
@@ -193,7 +150,7 @@ constexpr int64_t cufft_max_ndim = 3;
 // Ref: https://docs.nvidia.com/cuda/cufft/index.html#accuracy-and-performance
 bool has_large_prime_factor(int64_t n) {
   constexpr int64_t first_large_prime = 11;
-  const std::array<int64_t, 4> prime_radices{{2, 3, 5, 7}};
+  const std::initializer_list<int64_t> prime_radices{2, 3, 5, 7};
   for (auto prime : prime_radices) {
     if (n < first_large_prime) {
         return false;
@@ -207,8 +164,15 @@ bool has_large_prime_factor(int64_t n) {
 }
 
 // Execute a general fft operation (can be c2c, onesided r2c or onesided c2r)
-static const Tensor& _exec_fft(Tensor& out, const Tensor& self, IntArrayRef out_sizes,
+const Tensor& _exec_fft(Tensor& out, const Tensor& self, IntArrayRef out_sizes,
                          IntArrayRef dim, bool forward) {
+  // cuFFT rejects zero-element batches with CUFFT_INVALID_SIZE. An empty batch
+  // has nothing to transform, so skip planning/execution and return the output
+  // in its expected (empty) shape.
+  if (out.numel() == 0) {
+    out.resize_(out_sizes, MemoryFormat::Contiguous);
+    return out;
+  }
   const auto ndim = self.dim();
   const int64_t signal_ndim = dim.size();
   const auto batch_dims = ndim - signal_ndim;
@@ -262,25 +226,12 @@ static const Tensor& _exec_fft(Tensor& out, const Tensor& self, IntArrayRef out_
   CuFFTParams Params(input.strides(), out.strides(), signal_size, fft_type, value_type);
   CuFFTParamsLRUCache& plan_cache = cufft_get_plan_cache(input.device().index());
   std::unique_lock<std::mutex> guard(plan_cache.mutex, std::defer_lock);
-  c10::optional<CuFFTConfig> uncached_plan;
+  std::optional<CuFFTConfig> uncached_plan;
   const CuFFTConfig * config = nullptr;
 
-  // Workaround for gh-63152, gh-58724
-  // Bluestein plans in CUDA 11.1 (cufft 10.3) cannot be re-used
   // Bluestein's algorithm is only used when a size has large prime factors,
   // sizes with only small prime factors can still be cached
-  bool use_caching = true;
-#ifdef CUFFT_VERSION
-  if (10300 <= CUFFT_VERSION && CUFFT_VERSION < 10400) {
-    // Only cache plans for transforms with small prime factors
-    use_caching = std::none_of(
-        signal_size.begin() + 1, signal_size.end(), [](int64_t dim_size) {
-      return has_large_prime_factor(dim_size);
-    });
-  }
-#endif
-
-  if (use_caching && plan_cache.max_size() > 0) {
+  if (plan_cache.max_size() > 0) {
     guard.lock();
     if (plan_cache.max_size() > 0) {  // check again after acquiring the lock
       config = &plan_cache.lookup(Params);
@@ -301,10 +252,21 @@ static const Tensor& _exec_fft(Tensor& out, const Tensor& self, IntArrayRef out_
   // prepare cufft for execution
   CUFFT_CHECK(cufftSetStream(plan, at::cuda::getCurrentCUDAStream()));
   auto workspace = at::empty({ config->workspace_size() }, at::device(at::kCUDA).dtype(at::kByte));
-  CUFFT_CHECK(cufftSetWorkArea(plan, workspace.data_ptr()));
+  CUFFT_CHECK(cufftSetWorkArea(plan, workspace.mutable_data_ptr()));
 
   // execute transform plan
-  exec_cufft_plan(*config, input.data_ptr(), out.data_ptr(), forward);
+#if !defined(USE_ROCM)
+  CUcontext pctx = nullptr;
+  at::globalContext().getNVRTC().cuCtxGetCurrent(&pctx);
+  if (C10_UNLIKELY(!pctx)) {
+    // workaround for corner case where a primary context exists but is not
+    // the current context
+    TORCH_WARN_ONCE("Attempting to run cuFFT, but there was no current CUDA context! Attempting to set the primary context...");
+    at::globalContext().getNVRTC().cuDevicePrimaryCtxRetain(&pctx, 0);
+    at::globalContext().getNVRTC().cuCtxSetCurrent(pctx);
+  }
+#endif /* !defined(USE_ROCM) */
+  exec_cufft_plan(*config, const_cast<void*>(input.const_data_ptr()), out.data_ptr(), forward);
 
   // Inplace reshaping to original batch shape and inverting the dimension permutation
   DimVector out_strides(ndim);
@@ -363,6 +325,85 @@ bool use_optimized_cufft_path(IntArrayRef dim) {
 // n-dimensional real to complex FFT
 Tensor _fft_r2c_cufft(const Tensor& self, IntArrayRef dim, int64_t normalization, bool onesided) {
   TORCH_CHECK(self.is_floating_point());
+
+  // Bfloat16 FFT path.
+  //
+  // On CUDA SM_80+ (Ampere): cuFFT supports CUDA_R_16BF → CUDA_C_16BF natively.
+  // PyTorch has no ComplexBFloat16 type, so we allocate a ComplexHalf proxy
+  // buffer (same 4-byte element size as CUDA_C_16BF), let cuFFT write into it,
+  // then reinterpret and upcast to ComplexFloat.
+  // The multi-dim non-optimised path is excluded because subsequent C2C steps
+  // would use the wrong CUDA_C_16F plan via the ComplexHalf proxy dtype.
+  //
+  // On ROCm and pre-SM80 CUDA: no native bfloat16 kernel available;
+  // fall back to float32 promotion.
+  if (self.scalar_type() == ScalarType::BFloat16) {
+#if !defined(USE_ROCM)
+    auto dev_prop = at::cuda::getCurrentDeviceProperties();
+    auto input_sizes = self.sizes();
+    // Native bfloat16 cuFFT path requires all signal dims to be powers of two.
+    // If any dim is not pow2, fall through to the float32 promotion fallback below.
+    bool bf16_all_pow2 = true;
+    for (const auto d : dim) {
+      if (!is_pow_of_two(input_sizes[d])) {
+        bf16_all_pow2 = false;
+        break;
+      }
+    }
+    if (dev_prop->major >= 8 && use_optimized_cufft_path(dim) && bf16_all_pow2) {
+      DimVector onesided_sizes(input_sizes.begin(), input_sizes.end());
+      auto last_dim = dim.back();
+      auto last_dim_halfsize = (input_sizes[last_dim]) / 2 + 1;
+      onesided_sizes[last_dim] = last_dim_halfsize;
+
+      // proxy: ComplexHalf has the same element byte size as CUDA_C_16BF (4 bytes).
+      // CuFFTConfig sees value_type=BFloat16 from the *input* and plans
+      // CUDA_R_16BF → CUDA_C_16BF accordingly.
+      auto proxy = at::empty(onesided_sizes, self.options().dtype(kComplexHalf));
+
+      // R2C requires real input to be over-aligned (same rule as float path).
+      const auto complex_size = 2 * self.element_size();
+      const bool complex_aligned =
+          (reinterpret_cast<std::uintptr_t>(self.const_data_ptr()) % complex_size == 0);
+      auto working_tensor = self;
+      if (!complex_aligned) {
+        working_tensor = self.movedim(last_dim, -1)
+                             .clone(MemoryFormat::Contiguous)
+                             .movedim(-1, last_dim);
+      }
+
+      _exec_fft(proxy, working_tensor, onesided_sizes, dim, /*forward=*/true);
+
+      // Convert CUDA_C_16BF bytes (stored in the ComplexHalf proxy) to ComplexFloat:
+      //   view_as_real    → Half tensor    [..., 2]  (bits are actually bfloat16)
+      //   .view(BFloat16) → BFloat16 tensor [..., 2]  (correct bit interpretation)
+      //   .to(Float)      → Float tensor   [..., 2]  (bf16 → f32)
+      //   view_as_complex → ComplexFloat tensor [...]
+      auto output = at::view_as_complex(
+          at::view_as_real(proxy)
+              .view(ScalarType::BFloat16)
+              .to(ScalarType::Float));
+
+      auto out_slice = output.slice(last_dim, 0, last_dim_halfsize);
+      _fft_apply_normalization(out_slice, normalization, input_sizes, dim);
+
+      if (!onesided) {
+        IntArrayRef out_sizes = input_sizes;
+        if (output.sizes()[last_dim] != out_sizes[last_dim]) {
+          auto twosided = at::empty(out_sizes, output.options());
+          twosided.slice(last_dim, 0, last_dim_halfsize).copy_(output);
+          output = std::move(twosided);
+        }
+        at::native::_fft_fill_with_conjugate_symmetry_(output, dim);
+      }
+      return output;
+    }
+#endif // !defined(USE_ROCM)
+    // Fallback: ROCm, pre-SM80 CUDA, or multi-dim non-optimised path.
+    // Promote bfloat16 → float32 and re-enter.
+    return _fft_r2c_cufft(self.to(ScalarType::Float), dim, normalization, onesided);
+  }
+
   auto input_sizes = self.sizes();
   DimVector onesided_sizes(input_sizes.begin(), input_sizes.end());
   auto last_dim = dim.back();
@@ -376,7 +417,7 @@ Tensor _fft_r2c_cufft(const Tensor& self, IntArrayRef dim, int64_t normalization
   // CuFFT requires real input to be over-aligned, as if it were complex
   const auto complex_size = 2 * self.element_size();
   const bool complex_aligned = (
-      reinterpret_cast<std::uintptr_t>(self.data_ptr()) % complex_size == 0);
+      reinterpret_cast<std::uintptr_t>(self.const_data_ptr()) % complex_size == 0);
   auto working_tensor = self;
   if (!complex_aligned) {
     working_tensor = self.movedim(last_dim, -1)
@@ -534,4 +575,4 @@ Tensor& _fft_c2c_cufft_out(const Tensor& self, IntArrayRef dim,
 }
 
 
-}} // at::native
+} // at::native

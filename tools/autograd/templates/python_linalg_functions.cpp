@@ -5,7 +5,7 @@
 #include "torch/csrc/DynamicTypes.h"
 #include "torch/csrc/Exceptions.h"
 #include "torch/csrc/autograd/python_linalg_functions.h"
-#include "torch/csrc/autograd/python_return_types.h"
+#include "torch/csrc/autograd/generated/python_return_types.h"
 #include "torch/csrc/autograd/python_variable.h"
 #include "torch/csrc/autograd/utils/wrap_outputs.h"
 #include "torch/csrc/autograd/utils/python_arg_parsing.h"
@@ -29,7 +29,7 @@ using at::TensorList;
 
 using namespace torch::autograd::utils;
 
-namespace torch { namespace autograd {
+namespace torch::autograd {
 
 // generated forward declarations start here
 
@@ -52,17 +52,13 @@ void initLinalgFunctions(PyObject* module) {
   };
   PyObject* linalg = PyModule_Create(&def);
   THPLinalgVariableFunctionsModule = linalg;
-  if (!linalg) {
-    throw python_error();
-  }
+  TORCH_CHECK_PYTHON(linalg);
   // steals a reference to linalg
-  if (PyModule_AddObject(module, "_linalg", linalg) != 0) {
-    throw python_error();
-  }
+  TORCH_CHECK_PYTHON(PyModule_AddObject(module, "_linalg", linalg) == 0);
 }
 
 // generated methods start here
 
 ${py_methods}
 
-}} // namespace torch::autograd
+} // namespace torch::autograd

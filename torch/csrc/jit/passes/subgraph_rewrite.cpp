@@ -5,8 +5,9 @@
 
 #include <c10/util/irange.h>
 
-namespace torch {
-namespace jit {
+#include <utility>
+
+namespace torch::jit {
 
 namespace {
 void update_source_range_and_cs_ptr(
@@ -22,7 +23,7 @@ void update_source_range_and_cs_ptr(
   for (auto& it : pattern_node_map) {
     Node* replacement_node = it.first;
     Node* pattern_node = it.second;
-    if (!input_nodes.count(pattern_node)) {
+    if (!input_nodes.contains(pattern_node)) {
       Node* orig_node = m.nodes_map.at(pattern_node);
       replacement_node->setSourceRange(orig_node->sourceRange());
       if (orig_node->callstack()) {
@@ -54,8 +55,8 @@ void SubgraphRewriter::RegisterRewritePattern(
     const std::vector<std::pair<std::string, std::string>>& value_name_pairs) {
   std::unordered_map<std::string, std::string> value_name_map(
       value_name_pairs.begin(), value_name_pairs.end());
-  RewritePatternDescr d = {pattern, replacement, value_name_map};
-  patterns_.push_back(d);
+  RewritePatternDescr d = {pattern, replacement, std::move(value_name_map)};
+  patterns_.push_back(std::move(d));
 }
 
 Module SubgraphRewriter::runOnModule(const Module& module) {
@@ -92,14 +93,14 @@ void SubgraphRewriter::rewriteSinglePatternOnGraph(
 
   // First construct map of Node*-to-Node*
   // This maps Nodes in replacement graph to nodes in pattern graph
-  // given the value_name_map, which maps value names from repalcement
+  // given the value_name_map, which maps value names from replacement
   // pattern to value name in pattern
   std::unordered_map<Node*, Node*> pattern_node_map;
   std::set<const Node*> pattern_input_nodes;
   for (auto& it : vmap_replacement) {
     const auto& replacement_value_name = it.first;
     Node* replacement_value_node = it.second->node();
-    if (pattern.value_name_map.count(replacement_value_name)) {
+    if (pattern.value_name_map.contains(replacement_value_name)) {
       const auto& pattern_value_name =
           pattern.value_name_map.at(replacement_value_name);
       TORCH_CHECK(
@@ -180,7 +181,7 @@ void SubgraphRewriter::rewriteSinglePatternOnGraph(
     }
     // Record all planned deletions
     for (Node* pattern_n : pattern_graph.nodes()) {
-      if (match.nodes_map.count(pattern_n)) {
+      if (match.nodes_map.contains(pattern_n)) {
         Node* n = match.nodes_map.at(pattern_n);
         nodes_to_delete_.insert(n);
       }
@@ -204,7 +205,7 @@ void SubgraphRewriter::rewriteSinglePatternOnGraph(
 
 bool SubgraphRewriter::overlapsWithPreviousMatches(const Match* match) {
   for (auto n : match->nodes_map) {
-    if (nodes_to_delete_.count(n.second)) {
+    if (nodes_to_delete_.contains(n.second)) {
       return true;
     }
   }
@@ -218,5 +219,4 @@ Module PatternBasedRewrite(const Module& module) {
   return subgraph_rewriter.runOnModule(module);
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

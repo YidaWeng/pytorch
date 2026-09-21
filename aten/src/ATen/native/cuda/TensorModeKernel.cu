@@ -5,6 +5,8 @@
 #include <ATen/native/NonEmptyUtils.h>
 #include <ATen/cuda/detail/IndexUtils.cuh>
 #include <ATen/cuda/ThrustAllocator.h>
+#include <ATen/cuda/cub.cuh>
+#include <ATen/native/cuda/thrust_compat.h>
 #include <c10/core/DeviceArray.h>
 
 #include <thrust/count.h>
@@ -14,12 +16,10 @@
 #include <thrust/extrema.h>
 #include <thrust/find.h>
 #include <thrust/inner_product.h>
-#include <thrust/iterator/constant_iterator.h>
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
 
-namespace at {
-namespace native {
+namespace at::native {
 
 template <typename scalar_t>
 struct ModeImpl {
@@ -34,7 +34,7 @@ struct ModeImpl {
     auto cuda_allocator = at::cuda::getCUDADeviceAllocator();
     auto sort_buffer = c10::DeviceArray<int64_t>(*cuda_allocator, n_element);
     auto sort_buffer_ptr = thrust::device_pointer_cast(sort_buffer.get());
-    auto count_from_zero_iter = thrust::make_counting_iterator(int64_t{0});
+    auto count_from_zero_iter = cccl_counting_iterator<int64_t>{0ll};
     thrust::copy_n(policy, count_from_zero_iter, n_element, sort_buffer_ptr);
 
 
@@ -51,8 +51,8 @@ struct ModeImpl {
                     iter_end - 1,
                     iter_begin + 1,
                     0,
-                    thrust::plus<int>(),
-                    thrust::not_equal_to<scalar_t>());
+                    TORCH_CUDA_STD_NS::plus<int>(),
+                    TORCH_CUDA_STD_NS::not_equal_to<scalar_t>());
 
     // Count frequency of each element
     auto keys = c10::DeviceArray<scalar_t>(*cuda_allocator, unique);
@@ -65,7 +65,7 @@ struct ModeImpl {
         policy,
         iter_begin,
         iter_end,
-        thrust::constant_iterator<int>(1),
+        cccl_constant_iterator<int>{1},
         keys_ptr,
         counts_ptr);
 
@@ -141,8 +141,13 @@ void calculate_mode(
   // location of the buffer at the innermost dimension that we are going
   // to calculate the mode for --> we do this by manually doing the stride
   // calculations to get an offset
-  scalar_t* data = self.data_ptr<scalar_t>();
-  for (int64_t i = 0; i < position.size(); i++) {
+  //
+  // Yes, mutating self is a code smell, but we clone self before
+  // entering the bowels of this implementation.
+  //
+  // See [Note: CUDA torch.mode clones self]
+  scalar_t* data = self.mutable_data_ptr<scalar_t>();
+  for (int64_t i = 0; i < static_cast<int64_t>(position.size()); i++) {
     data += position[i] * ensure_nonempty_stride(self, i);
   }
 
@@ -152,15 +157,13 @@ void calculate_mode(
   scalar_t* iter_begin = data;
   scalar_t* iter_end = data + n_element;
 
-  scalar_t mode;
-  int64_t index;
-  std::tie(mode, index) = ModeImpl<scalar_t>{}(iter_begin, iter_end);
+  auto [mode, index] = ModeImpl<scalar_t>{}(iter_begin, iter_end);
 
   // Place mode, index in output
-  scalar_t* values_data = values.data_ptr<scalar_t>();
-  int64_t* indices_data = indices.data_ptr<int64_t>();
+  scalar_t* values_data = values.mutable_data_ptr<scalar_t>();
+  int64_t* indices_data = indices.mutable_data_ptr<int64_t>();
 
-  for (int64_t i = 0; i < position.size(); i++) {
+  for (int64_t i = 0; i < static_cast<int64_t>(position.size()); i++) {
     int64_t pos = position[i];
     values_data += ensure_nonempty_stride(values, i) * pos;
     indices_data += ensure_nonempty_stride(indices, i) * pos;
@@ -205,12 +208,12 @@ void handle_fused_mode(
   constexpr int num_threads = size / 2;
   int warp_size = at::cuda::warp_size();
   TORCH_INTERNAL_ASSERT(num_threads % warp_size == 0 &&
-                num_threads <= cuda_utils::kCUDABlockReduceMaxThreads, "");
+                num_threads <= cuda_utils::kCUDABlockReduceMaxThreads(), "");
   const auto memsize =
       (sizeof(scalar_t) * size) + (2 * size * sizeof(unsigned int));
   compute_mode<scalar_t, size>
       <<<grid, num_threads, memsize, at::cuda::getCurrentCUDAStream()>>>(
-          self.data_ptr<scalar_t>(), ti_values, ti_indices, slice_size, slices);
+          self.const_data_ptr<scalar_t>(), ti_values, ti_indices, slice_size, slices);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -283,5 +286,4 @@ void launch_apply_mode_kernel(const TensorBase &values, const TensorBase &indice
   });
 }
 
-} // namespace native
-} // namespace at
+} // namespace at::native

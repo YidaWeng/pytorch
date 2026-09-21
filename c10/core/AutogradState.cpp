@@ -1,9 +1,11 @@
 #include <c10/core/AutogradState.h>
 
+#include <utility>
+
 namespace c10 {
 
 namespace {
-// By default, grad mode and mulithreading are enabled, inference mode is
+// By default, grad mode and multithreading are enabled, inference mode is
 // disabled,
 thread_local AutogradState autograd_state_tls = AutogradState(
     /* grad_mode */ true,
@@ -17,7 +19,7 @@ AutogradState& AutogradState::get_tls_state() {
 }
 
 void AutogradState::set_tls_state(AutogradState state) {
-  autograd_state_tls = state;
+  autograd_state_tls = std::move(state);
 }
 
 } // namespace c10

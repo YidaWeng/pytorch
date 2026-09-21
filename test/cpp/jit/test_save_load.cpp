@@ -1,14 +1,18 @@
 #include <gtest/gtest.h>
 
 #include <test/cpp/jit/test_utils.h>
+#include <cstdlib>
+#include <iostream>
 #include <sstream>
 
+#include <caffe2/serialize/inline_container.h>
 #include <torch/csrc/jit/mobile/module.h>
 #include <torch/csrc/jit/runtime/calculate_necessary_args.h>
 #include <torch/csrc/jit/serialization/export.h>
 #include <torch/csrc/jit/serialization/export_bytecode.h>
 #include <torch/csrc/jit/serialization/import.h>
 #include <torch/csrc/jit/serialization/import_source.h>
+#include <torch/script.h>
 #include <torch/torch.h>
 
 #include "caffe2/serialize/istream_adapter.h"
@@ -65,7 +69,7 @@ TEST(SerializationTest, ExtraFilesHookPreference) {
   module->save(oss, extra_files);
   SetExportModuleExtraFilesHook(nullptr);
 
-  std::istringstream iss(oss.str());
+  std::istringstream iss(std::move(oss).str());
   caffe2::serialize::IStreamAdapter adapter{&iss};
   std::unordered_map<std::string, std::string> loaded_extra_files;
   loaded_extra_files["metadata.json"] = "";
@@ -87,7 +91,7 @@ TEST(SerializationTest, ExtraFileHooksNoSecret) {
     ExtraFilesMap extra;
     extra["metadata.json"] = "";
     extra["secret.json"] = "";
-    jit::load(ss, c10::nullopt, extra);
+    jit::load(ss, std::nullopt, extra);
     ASSERT_EQ(extra["metadata.json"], "abc");
     ASSERT_EQ(extra["secret.json"], "");
   }
@@ -110,7 +114,7 @@ TEST(SerializationTest, ExtraFileHooksWithSecret) {
     ExtraFilesMap extra;
     extra["metadata.json"] = "";
     extra["secret.json"] = "";
-    jit::load(ss, c10::nullopt, extra);
+    jit::load(ss, std::nullopt, extra);
     ASSERT_EQ(extra["metadata.json"], "abc");
     ASSERT_EQ(extra["secret.json"], "topsecret");
   }
@@ -148,6 +152,90 @@ TEST(SerializationTest, TypeTags) {
     ASSERT_TRUE(loaded.type()->isSubtypeOf(*item.expected_type));
     ASSERT_TRUE(item.expected_type->isSubtypeOf(*loaded.type()));
   }
+}
+
+namespace {
+
+// A class whose __setstate__ takes a precisely typed nested container, so that
+// tag restoration has something observable to correct.
+Module moduleWithNestedListState() {
+  Module m("m");
+  m.define(R"JIT(
+    def __getstate__(self) -> List[List[int]]:
+      return [[1, 2, 3]]
+
+    def __setstate__(self, state: List[List[int]]) -> None:
+      pass
+  )JIT");
+  return m;
+}
+
+// What the unpickler hands to the object loader for an archive that carries no
+// serialized container type strings: the right values, but generic tags.
+c10::impl::GenericList genericallyTaggedNestedList() {
+  auto inner = c10::impl::GenericList(AnyType::get());
+  inner.push_back(1);
+  inner.push_back(2);
+  auto outer = c10::impl::GenericList(AnyType::get());
+  outer.push_back(inner);
+  return outer;
+}
+
+} // namespace
+
+// See [type tag serialization] in unpickler.h. Archives at version 2 or lower
+// carry no container type strings, so the object loader has to re-derive the
+// tags from __setstate__'s schema before __setstate__ can run at all.
+TEST(SerializationTest, ObjLoaderRestoresTypeTagsForLegacyArchive) {
+  auto m = moduleWithNestedListState();
+  at::StrongTypePtr type(m._ivalue()->compilation_unit(), m.type());
+
+  auto outer = genericallyTaggedNestedList();
+  auto inner = outer.get(0).toList();
+
+  ObjLoaderFuncWithVersion(type, IValue(outer), /*archive_version=*/2);
+
+  // Corrected in place, on the nested container as well as the outer one.
+  EXPECT_EQ(*outer.elementType(), *ListType::create(IntType::get()));
+  EXPECT_EQ(*inner.elementType(), *IntType::get());
+}
+
+// The two-argument overload has no version to go on, so it stays on the legacy
+// path. Callers that pass it as an ObjLoader depend on this.
+TEST(SerializationTest, ObjLoaderWithoutVersionRestoresTypeTags) {
+  auto m = moduleWithNestedListState();
+  at::StrongTypePtr type(m._ivalue()->compilation_unit(), m.type());
+
+  auto outer = genericallyTaggedNestedList();
+
+  ObjLoaderFunc(type, IValue(outer));
+
+  EXPECT_EQ(*outer.elementType(), *ListType::create(IntType::get()));
+}
+
+// From version 3 on the unpickler has already applied the serialized type
+// strings, so the loader skips the traversal and passes the state through
+// untouched.
+TEST(SerializationTest, ObjLoaderSkipsTypeTagRestorationForModernArchive) {
+  auto m = moduleWithNestedListState();
+  at::StrongTypePtr type(m._ivalue()->compilation_unit(), m.type());
+
+  // An already-tagged state, which is what a version >= 3 archive produces,
+  // loads without the traversal.
+  auto tagged_inner = c10::impl::GenericList(IntType::get());
+  tagged_inner.push_back(1);
+  auto tagged = c10::impl::GenericList(ListType::create(IntType::get()));
+  tagged.push_back(tagged_inner);
+  ObjLoaderFuncWithVersion(type, IValue(tagged), /*archive_version=*/3);
+  EXPECT_EQ(*tagged.elementType(), *ListType::create(IntType::get()));
+
+  // A generically tagged state is left exactly as it arrived. Nothing corrects
+  // it, so __setstate__'s own type check is what rejects it -- which is why
+  // this path is only safe once the unpickler tags containers eagerly.
+  auto untagged = genericallyTaggedNestedList();
+  EXPECT_ANY_THROW(
+      ObjLoaderFuncWithVersion(type, IValue(untagged), /*archive_version=*/3));
+  EXPECT_EQ(*untagged.elementType(), *AnyType::get());
 }
 
 TEST(SerializationTest, TestJitStream_CUDA) {
@@ -260,6 +348,37 @@ TEST(SerializationTest, ParentDirNotExist) {
       "Parent directory ./doesnotexist does not exist.");
 }
 
+#ifdef WIN32
+TEST(SerializationTest, WindowsDrivePathTest) {
+  // "ZZZ" is typically not a valid drive letter.
+  // We expect to see "ZZZ:\\" or "ZZZ:/" in the error message.
+  // Note: slash should be included for the drive letter parent in Windows.
+  expectThrowsEq(
+      []() {
+        auto t = torch::nn::Linear(5, 5);
+        torch::save(t, "ZZZ:\\file.pt");
+      },
+      "Parent directory ZZZ:\\ does not exist.");
+  expectThrowsEq(
+      []() {
+        auto t = torch::nn::Linear(5, 5);
+        torch::save(t, "ZZZ:/file.pt");
+      },
+      "Parent directory ZZZ:/ does not exist.");
+}
+
+TEST(SerializationTest, WindowsTempPathTest) {
+  // Test for verifying file saving and loading in the temporary folder
+  std::string temp_dir = std::getenv("TEMP");
+  std::string file_path = temp_dir + "/file.pt";
+  auto t1 = torch::tensor(1.0);
+  torch::save(t1, file_path);
+  torch::Tensor t2;
+  torch::load(t2, file_path);
+  ASSERT_TRUE(t1.allclose(t2, 0.0, 0.0));
+}
+#endif
+
 TEST(SerializationTest, CalculateNecessaryArgsTest) {
   auto schema = torch::schema(
       "sync_stream(int stream_id = -1) -> ()",
@@ -270,6 +389,60 @@ TEST(SerializationTest, CalculateNecessaryArgsTest) {
   auto necessary = CalculateNecessaryArgs(schema.arguments(), {one_val}, true);
   EXPECT_EQ(0, necessary.first);
   EXPECT_EQ(0, necessary.second);
+}
+
+TEST(TestSaveLoad, LoadWithoutDebugInfo) { // NOLINT (use =delete in gtest)
+  Module m("m");
+  m.register_parameter("foo", torch::ones({}), false);
+  m.define(
+      R"(
+    def test_func(self, x):
+      b = 4
+      return self.foo + x + b
+    )");
+  m.define(
+      R"(
+    def exception(self):
+      assert False, "message"
+    )");
+  std::stringstream ss;
+  m.save(ss);
+  ss.seekg(0);
+  caffe2::serialize::PyTorchStreamReader reader(&ss);
+  reader.setShouldLoadDebugSymbol(true);
+  EXPECT_TRUE(reader.hasRecord("code/__torch__.py.debug_pkl"));
+  reader.setShouldLoadDebugSymbol(false);
+  EXPECT_FALSE(reader.hasRecord("code/__torch__.py.debug_pkl"));
+  ss.seekg(0);
+  Module m2 = torch::jit::load(ss);
+  std::string error_msg = R"(
+    def exception(self):
+      assert False, "message"
+      ~~~~~~~~~~~~~~~~~~~~~~~ <--- HERE)";
+  ASSERT_THROWS_WITH_MESSAGE(m2.run_method("exception"), error_msg);
+
+  ss.seekg(0);
+  // NO DEBUG trace so error message points to torchscript generated
+  // source instead of original python source.
+  std::string error2 = R"(
+    def exception(self: __torch__.m) -> NoneType:
+      _0 = uninitialized(NoneType)
+      ops.prim.RaiseException("AssertionError: message")
+      ~~~~~~~~~~~~~~~~~~~~~~~ <--- HERE
+      return _0
+  )";
+  Module m3 = torch::jit::load(ss, std::nullopt, false);
+  ASSERT_THROWS_WITH_MESSAGE(m3.run_method("exception"), error2);
+}
+
+TEST(SerializationTest, TestPickleAppend) {
+  auto data = std::vector<char>({'\x80', char(2), ']', 'K', char(2), 'a', '.'});
+
+  torch::IValue actual = torch::jit::unpickle(data.data(), data.size());
+
+  torch::IValue expected = c10::impl::GenericList(at::AnyType::get());
+  expected.toList().push_back(2);
+  ASSERT_EQ(expected, actual);
 }
 
 } // namespace jit

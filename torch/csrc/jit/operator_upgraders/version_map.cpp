@@ -5,8 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 // this flag is used to make sure the elements in the version map
 // are sorted according to when the upgraders are introduced.
@@ -76,10 +75,6 @@ static std::unordered_map<std::string, std::vector<UpgraderEntry>> operatorVersi
       {{5,
         "full_0_4",
         "aten::full(int[] size, Scalar fill_value, *, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None) -> Tensor"}}},
-     {"aten::full.names",
-      {{5,
-        "full_names_0_4",
-        "aten::full.names(int[] size, Scalar fill_value, *, Dimname[]? names, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None) -> Tensor"}}},
      {"aten::full.out",
       {{5,
         "full_out_0_4",
@@ -108,7 +103,7 @@ get_operator_version_map() {
 
 void test_only_add_entry(const std::string& op_name, UpgraderEntry entry) {
   test_only_reset_flag();
-  operatorVersionMap[op_name].push_back(entry);
+  operatorVersionMap[op_name].emplace_back(std::move(entry));
 }
 
 void test_only_remove_entry(const std::string& op_name) {
@@ -130,5 +125,4 @@ bool get_version_calculator_flag() {
   return calculatePackageVersionBasedOnUpgraders;
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

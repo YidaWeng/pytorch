@@ -10,13 +10,12 @@
 #include <torch/csrc/jit/passes/eliminate_no_ops.h>
 #include <torch/csrc/jit/passes/inliner.h>
 #include <torch/csrc/jit/passes/lower_tuples.h>
-#include <torch/csrc/jit/passes/remove_mutation.h>
 #include <torch/csrc/jit/runtime/graph_executor_impl.h>
 
 #include <stack>
+#include <utility>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
 
@@ -32,11 +31,11 @@ std::vector<std::string> splitName(const std::string& name) {
 
 template <typename Iter>
 std::string concatName(const Iter& begin, const Iter& end) {
-  std::string combined_name = "";
+  std::string combined_name;
   for (Iter it = begin; it != end; ++it) {
     const std::string& sub_name = *it;
     if (!combined_name.empty()) {
-      combined_name += ".";
+      combined_name += '.';
     }
     combined_name += sub_name;
   }
@@ -61,7 +60,7 @@ class AttributePropagator {
         const auto& attr_name = resolved_name->second;
         if (parent_module.hasattr(attr_name)) {
           auto value = parent_module.attr(attr_name);
-          // Freezing client wants to presever this submodule. When cleaning
+          // Freezing client wants to preserve this submodule. When cleaning
           // the frozen module, make sure it will be preserved entirely.
           if (value.isModule()) {
             preservedSubModule_.insert(value.toModule()._ivalue());
@@ -167,10 +166,10 @@ class AttributePropagator {
   // Examples:
   // submodule1.submodule2.foo -> {submodule2, "foo"}
   // submodule1.non_existent_module.foo -> nullopt
-  c10::optional<ResolvedName> resolveName(const std::string& name) {
+  std::optional<ResolvedName> resolveName(const std::string& name) {
     auto sub_names = splitName(name);
     if (sub_names.empty()) {
-      return c10::nullopt;
+      return std::nullopt;
     }
     auto& attr_name = sub_names.back();
     auto cur_module = module_;
@@ -189,7 +188,7 @@ class AttributePropagator {
         }
       }
       if (!found) {
-        return c10::nullopt;
+        return std::nullopt;
       }
     }
 
@@ -207,7 +206,7 @@ class AttributePropagator {
       return std::make_pair(std::move(cur_module), std::move(attr_name));
     }
 
-    return c10::nullopt;
+    return std::nullopt;
   }
 
   bool _loadModulePath(Value* input, std::shared_ptr<Graph>& graph) {
@@ -225,12 +224,12 @@ class AttributePropagator {
     return true;
   }
 
-  c10::optional<std::deque<std::string>> getModulePath(
+  std::optional<std::deque<std::string>> getModulePath(
       Value* input,
       std::shared_ptr<Graph>& graph) {
     bool success = _loadModulePath(input, graph);
     if (!success) {
-      return c10::nullopt;
+      return std::nullopt;
     }
     return names_;
   }
@@ -242,7 +241,7 @@ class AttributePropagator {
       const Iter& end) {
     for (Iter it = begin; it != end; ++it) {
       const std::string& moduleName = *it;
-      if (preservedAttrs_.count(attrModule.attr(moduleName))) {
+      if (preservedAttrs_.contains(attrModule.attr(moduleName))) {
         return false;
       }
       attrModule = attrModule.attr(moduleName).toModule();
@@ -313,10 +312,10 @@ class AttributePropagator {
     auto attr = attrModule.attr(name);
     if (!AliasDb::isMutableType(attr.type())) {
       auto it = preservedScalarAttrs_.find(attrModule._ivalue());
-      return it == preservedScalarAttrs_.end() || !it->second.count(name);
+      return it == preservedScalarAttrs_.end() || !it->second.contains(name);
     }
 
-    if (preservedAttrs_.count(attr)) {
+    if (preservedAttrs_.contains(attr)) {
       return false;
     }
     if (!attr.type()->cast<ClassType>()) {
@@ -343,7 +342,7 @@ class AttributePropagator {
   void recordMutableAttrs(std::shared_ptr<Graph>& graph) {
     std::stack<Block*> blocks({graph->block()});
     std::unique_ptr<AliasDb> aliasDb =
-        torch::make_unique<AliasDb>(graph, /* isFrozen */ true);
+        std::make_unique<AliasDb>(graph, /* isFrozen */ true);
     while (!blocks.empty()) {
       Block* block = blocks.top();
       blocks.pop();
@@ -396,11 +395,9 @@ class AttributePropagator {
           applyToForkSubgraph(
               n,
               graph,
-              // NOLINTNEXTLINE(modernize-avoid-bind)
-              std::bind(
-                  &AttributePropagator::recordMutableAttrs,
-                  *this,
-                  std::placeholders::_1));
+              // TODO: Determine if passing `this` by copy is intentional
+              // github.com/pytorch/pytorch/pull/195598#issuecomment-5497079717
+              std::bind_front(&AttributePropagator::recordMutableAttrs, *this));
         }
       }
     }
@@ -446,7 +443,7 @@ class AttributePropagator {
       auto dict = std::move(attr).toGenericDict();
       for (const auto& pair : dict) {
         auto val = pair.value();
-        val = overrideGradient(val);
+        val = overrideGradient(std::move(val));
       }
       attr = std::move(dict);
     } else if (attr.isObject() && !attr.toObjectRef().type()->is_module()) {
@@ -455,7 +452,7 @@ class AttributePropagator {
       auto sub_attributes = obj_type->getAttributes();
       for (const auto& sub_attr : sub_attributes) {
         auto sub_attr_val = obj_value->getAttr(sub_attr.getName());
-        sub_attr_val = overrideGradient(sub_attr_val);
+        sub_attr_val = overrideGradient(std::move(sub_attr_val));
       }
       return obj_value;
     }
@@ -688,7 +685,7 @@ class AttributePropagator {
               attr = overrideGradient(attr);
             }
             if (attr.isObject()) {
-              if (object_memo_.count(attr.toObject())) {
+              if (object_memo_.contains(attr.toObject())) {
                 attr = object_memo_[attr.toObject()];
               } else {
                 auto weak_class_obj =
@@ -725,11 +722,10 @@ class AttributePropagator {
           applyToForkSubgraph(
               n,
               graph,
-              // NOLINTNEXTLINE(modernize-avoid-bind)
-              std::bind(
-                  &AttributePropagator::propagateAttributes,
-                  *this,
-                  std::placeholders::_1));
+              // TODO: Determine if passing `this` by copy is intentional
+              // github.com/pytorch/pytorch/pull/195598#issuecomment-5497079717
+              std::bind_front(
+                  &AttributePropagator::propagateAttributes, *this));
         }
       }
     }
@@ -759,7 +755,7 @@ class AttributePropagator {
 
     auto subgraph = n->g(attr::Subgraph);
     func(subgraph);
-    module_ = attrModule;
+    module_ = std::move(attrModule);
   }
 
   bool moduleEscapes(Module& subModule, std::shared_ptr<Graph>& graph) {
@@ -768,7 +764,7 @@ class AttributePropagator {
         return true;
       }
     }
-    return preservedSubModule_.count(subModule._ivalue());
+    return preservedSubModule_.contains(subModule._ivalue());
   }
 
   void removeExtraWaitCalls(Block* b) {
@@ -780,7 +776,7 @@ class AttributePropagator {
       }
       TORCH_INTERNAL_ASSERT(node->inputs().size() == 1);
       TORCH_INTERNAL_ASSERT(node->outputs().size() == 1);
-      // If input type is not a from aten::fork call then the
+      // If input type is not from an aten::fork call then the
       // aten::wait operator can be deleted.
       if (node->input()->type()->kind() != TypeKind::FutureType) {
         node->output()->replaceAllUsesWith(node->input());
@@ -812,7 +808,7 @@ class AttributePropagator {
     removeUnusedAttrs();
   }
 
-  // Prepraring for clean up phase. At this point, record all subModules that
+  // Preparing for clean up phase. At this point, record all subModules that
   // contains mutable attributes.
   void recordReferencedAttrs(std::shared_ptr<Graph>& graph) {
     std::stack<Block*> blocks({graph->block()});
@@ -852,11 +848,10 @@ class AttributePropagator {
           applyToForkSubgraph(
               n,
               graph,
-              // NOLINTNEXTLINE(modernize-avoid-bind)
-              std::bind(
-                  &AttributePropagator::recordReferencedAttrs,
-                  *this,
-                  std::placeholders::_1));
+              // TODO: Determine if passing `this` by copy is intentional
+              // github.com/pytorch/pytorch/pull/195598#issuecomment-5497079717
+              std::bind_front(
+                  &AttributePropagator::recordReferencedAttrs, *this));
         }
       }
     }
@@ -882,7 +877,7 @@ class AttributePropagator {
     auto type = module.type();
     size_t N = type->numAttributes();
     if (moduleEscapes(module, graph)) {
-      // Perserve all its attributes and methods.
+      // Preserve all its attributes and methods.
       attrsToKeep_[type].insert(N);
       return;
     }
@@ -894,13 +889,12 @@ class AttributePropagator {
       auto attr = module.attr(name);
       auto attrTy = attr.type();
 
-      // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-      bool isMutable;
+      bool isMutable = false;
       if (AliasDb::isMutableType(attrTy)) {
-        isMutable = preservedAttrs_.count(attr);
+        isMutable = preservedAttrs_.contains(attr);
       } else {
         isMutable =
-            it2 != preservedScalarAttrs_.end() && it2->second.count(name);
+            it2 != preservedScalarAttrs_.end() && it2->second.contains(name);
       }
       if (isMutable) {
         attrsToKeep_[type].insert(i);
@@ -918,7 +912,7 @@ class AttributePropagator {
   }
 
   // Remove unused attributes and methods for each sub module of the frozen
-  // module. This function iterates over the Calsstypes of its submodule
+  // module. This function iterates over the Classtypes of its submodule
   // attributes including its own type.
   void removeUnusedAttrs() {
     std::vector<std::string> attrsToRemove;
@@ -926,16 +920,16 @@ class AttributePropagator {
     for (auto& it : attrsToKeep_) {
       auto& type = it.first;
       size_t N = type->numAttributes();
-      if (it.second.count(N)) {
+      if (it.second.contains(N)) {
         continue;
       }
       for (const auto i : c10::irange(N)) {
-        if (it.second.count(i) == 0) {
+        if (!it.second.contains(i)) {
           attrsToRemove.push_back(type->getAttributeName(i));
         }
       }
       for (auto& fn : type->methods()) {
-        if (preservedMethods_.count(fn)) {
+        if (preservedMethods_.contains(fn)) {
           continue;
         }
         funcsToRemove.push_back(fn);
@@ -982,6 +976,7 @@ class AttributePropagator {
   std::unordered_map<ClassTypePtr, IValue::HashAliasedIValues>
       SharedTypeSubModules_;
 
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-const-or-ref-data-members)
   Module& module_;
 
   // Allow to freeze modules containing interfaces.
@@ -1045,5 +1040,4 @@ void freeze_module_inplace(
   attrPropagator.run();
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

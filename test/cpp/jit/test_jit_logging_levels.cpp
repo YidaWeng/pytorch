@@ -41,8 +41,16 @@ TEST(JitLoggingTest, CheckOutputStreamSetting) {
   ::torch::jit::set_jit_logging_levels("test_jit_logging_levels");
   std::ostringstream test_stream;
   ::torch::jit::set_jit_logging_output_stream(test_stream);
-  JIT_LOG(::torch::jit::JitLoggingLevels::GRAPH_DUMP, "Message");
-  ASSERT_TRUE(test_stream.str().size() > 0);
+  /* Using JIT_LOG checks if this file has logging enabled with
+    is_enabled(__FILE__, level) making the test fail. since we are only testing
+    the OutputStreamSetting we can forcefully output to it directly.
+  */
+  ::torch::jit::get_jit_logging_output_stream() << ::torch::jit::jit_log_prefix(
+      ::torch::jit::JitLoggingLevels::GRAPH_DUMP,
+      __FILE__,
+      __LINE__,
+      ::c10::str("Message"));
+  ASSERT_TRUE(std::move(test_stream).str().size() > 0);
 }
 
 } // namespace jit

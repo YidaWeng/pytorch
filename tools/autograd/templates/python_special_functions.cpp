@@ -5,7 +5,7 @@
 #include "torch/csrc/DynamicTypes.h"
 #include "torch/csrc/Exceptions.h"
 #include "torch/csrc/autograd/python_special_functions.h"
-#include "torch/csrc/autograd/python_return_types.h"
+#include "torch/csrc/autograd/generated/python_return_types.h"
 #include "torch/csrc/autograd/python_variable.h"
 #include "torch/csrc/autograd/utils/wrap_outputs.h"
 #include "torch/csrc/autograd/utils/python_arg_parsing.h"
@@ -14,7 +14,7 @@
 #include "torch/csrc/utils/pycfunction_helpers.h"
 #include "torch/csrc/utils/python_arg_parser.h"
 #include "torch/csrc/utils/structseq.h"
-#include "torch/csrc/utils/cuda_lazy_init.h"
+#include "torch/csrc/utils/device_lazy_init.h"
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -34,13 +34,11 @@ using at::TensorOptions;
 using at::IntArrayRef;
 using at::Generator;
 using at::TensorList;
-using at::Dimname;
-using at::DimnameList;
 
 using torch::utils::check_out_type_matches;
 using namespace torch::autograd::utils;
 
-namespace torch { namespace autograd {
+namespace torch::autograd {
 
 // generated forward declarations start here
 
@@ -63,17 +61,13 @@ void initSpecialFunctions(PyObject* module) {
   };
   PyObject* special = PyModule_Create(&def);
   THPSpecialVariableFunctionsModule = special;
-  if (!special) {
-    throw python_error();
-  }
+  TORCH_CHECK_PYTHON(special);
   // steals a reference to special
-  if (PyModule_AddObject(module, "_special", special) != 0) {
-    throw python_error();
-  }
+  TORCH_CHECK_PYTHON(PyModule_AddObject(module, "_special", special) == 0);
 }
 
 // generated methods start here
 
 ${py_methods}
 
-}} // namespace torch::autograd
+} // namespace torch::autograd

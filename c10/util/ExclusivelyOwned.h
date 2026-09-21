@@ -1,6 +1,6 @@
 #pragma once
 
-#include <c10/util/in_place.h>
+#include <utility>
 
 namespace c10 {
 
@@ -55,10 +55,7 @@ struct ExclusivelyOwnedTraits;
 template <typename T>
 class ExclusivelyOwned {
   using EOT = ExclusivelyOwnedTraits<T>;
-  union {
-    char dummy_;
-    typename ExclusivelyOwnedTraits<T>::repr_type repr_;
-  };
+  typename ExclusivelyOwnedTraits<T>::repr_type repr_;
 
  public:
   ExclusivelyOwned() : repr_(EOT::nullRepr()) {}
@@ -66,7 +63,7 @@ class ExclusivelyOwned {
   explicit ExclusivelyOwned(T&& t) : repr_(EOT::moveToRepr(std::move(t))) {}
 
   template <class... Args>
-  explicit ExclusivelyOwned(in_place_t, Args&&... args)
+  explicit ExclusivelyOwned(std::in_place_t /*unused*/, Args&&... args)
       : repr_(EOT::createInPlace(std::forward<Args>(args)...)) {}
 
   ExclusivelyOwned(const ExclusivelyOwned&) = delete;
@@ -104,38 +101,39 @@ class ExclusivelyOwned {
   // undefined Tensor as its null state.
   explicit operator bool() const noexcept = delete;
 
-  operator T() && {
+  [[nodiscard]] operator T() && {
     return take();
   }
 
   // NOTE: the equivalent operation on MaybeOwned is a moving
   // operator*. For ExclusivelyOwned, take() and operator*() may well
   // have different return types, so they are different functions.
-  T take() && {
+  [[nodiscard]] T take() && {
     return EOT::take(repr_);
   }
 
-  typename EOT::const_pointer_type operator->() const {
+  [[nodiscard]] typename EOT::const_pointer_type operator->() const {
     return get();
   }
 
-  typename EOT::const_pointer_type get() const {
+  [[nodiscard]] typename EOT::const_pointer_type get() const {
     return EOT::getImpl(repr_);
   }
 
-  typename EOT::pointer_type operator->() {
+  [[nodiscard]] typename EOT::pointer_type operator->() {
     return get();
   }
 
-  typename EOT::pointer_type get() {
+  [[nodiscard]] typename EOT::pointer_type get() {
     return EOT::getImpl(repr_);
   }
 
-  std::remove_pointer_t<typename EOT::const_pointer_type>& operator*() const {
+  [[nodiscard]] std::remove_pointer_t<typename EOT::const_pointer_type>&
+  operator*() const {
     return *get();
   }
 
-  std::remove_pointer_t<typename EOT::pointer_type>& operator*() {
+  [[nodiscard]] std::remove_pointer_t<typename EOT::pointer_type>& operator*() {
     return *get();
   }
 };

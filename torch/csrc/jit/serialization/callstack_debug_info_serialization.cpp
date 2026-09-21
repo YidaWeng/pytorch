@@ -3,11 +3,10 @@
 #include <torch/csrc/jit/serialization/callstack_debug_info_serialization.h>
 #include <torch/csrc/jit/serialization/pickle.h>
 
-namespace torch {
-namespace jit {
+namespace torch::jit {
 
 namespace {
-const int64_t kInvalidSourceRangeTag = -1;
+constexpr int64_t kInvalidSourceRangeTag = -1;
 } // namespace
 
 c10::IValue InlinedCallStackSerializer::serialize(
@@ -46,7 +45,7 @@ c10::IValue InlinedCallStackSerializer::serialize(
     elements.emplace_back(
         serialize(cs_ptr->callee().value(), source_range_tags));
   } else {
-    elements.emplace_back(c10::IValue());
+    elements.emplace_back();
   }
   auto fn_name = cs_ptr->function_name();
   if (!fn_name.empty()) {
@@ -60,7 +59,7 @@ c10::IValue InlinedCallStackSerializer::serialize(
 }
 
 c10::IValue InlinedCallStackSerializer::serialize_module_instance_info(
-    const c10::optional<ModuleInstanceInfo>& m) {
+    const std::optional<ModuleInstanceInfo>& m) {
   if (!m) {
     return c10::IValue();
   }
@@ -90,7 +89,7 @@ std::vector<char> CallStackDebugInfoPickler::pickle(
     int64_t debug_handle = it.first;
     std::vector<c10::IValue> elements;
     /*
-     * Debug handles and debug info (source range + inlinded callstack)
+     * Debug handles and debug info (source range + inlined callstack)
      * are serialized as a tuple of 3 elements
      * {debug_handle, source_range_tag, serialized_callstack}
      */
@@ -116,7 +115,7 @@ std::vector<char> CallStackDebugInfoPickler::pickle(
   std::vector<at::Tensor> table;
   c10::IValue ivalue = c10::ivalue::Tuple::create(std::move(ivalues));
   auto result = jit::pickle(ivalue, &table);
-  TORCH_CHECK(table.size() == 0, "Expected 0 tensors to be written");
+  TORCH_CHECK(table.empty(), "Expected 0 tensors to be written");
   return result;
 }
 
@@ -156,26 +155,25 @@ InlinedCallStackPtr InlinedCallStackDeserializer::deserialize(
   InlinedCallStackPtr cs_ptr;
   if (callee) {
     cs_ptr = c10::make_intrusive<InlinedCallStack>(
-        callee, nullptr, source_range, module_instance_info);
+        callee, nullptr, source_range, module_instance_info, function_name);
   } else {
     cs_ptr = c10::make_intrusive<InlinedCallStack>(
-        nullptr, source_range, module_instance_info);
+        nullptr, source_range, module_instance_info, function_name);
   }
-  cs_ptr->set_function_name(function_name);
   cached_inlined_callstacks_[tup] = cs_ptr;
   // Invoking move constructor
-  // It is not clear if copy-ellision can happen since
+  // It is not clear if copy-elision can happen since
   // cs_ptr is copied into map above.
   // This is to help avoid ref count update
   return cs_ptr;
 }
 
-c10::optional<ModuleInstanceInfo> InlinedCallStackDeserializer::
+std::optional<ModuleInstanceInfo> InlinedCallStackDeserializer::
     deserialize_module_instance_info(
         const c10::IValue& iv,
         const std::shared_ptr<CompilationUnit>& cu) {
   if (iv.isNone()) {
-    return c10::nullopt;
+    return std::nullopt;
   }
   auto tup = iv.toTuple();
   auto it = cached_module_instance_info_.find(tup);
@@ -211,7 +209,7 @@ c10::optional<ModuleInstanceInfo> InlinedCallStackDeserializer::
 
 ska::flat_hash_map<int64_t, DebugInfoTuple> CallStackDebugInfoUnpickler::
     unpickle(
-        at::DataPtr&& data,
+        const at::DataPtr& data,
         size_t size,
         const ska::flat_hash_map<int64_t, SourceRange>& source_range_map,
         const std::shared_ptr<CompilationUnit>& cu) {
@@ -248,5 +246,4 @@ ska::flat_hash_map<int64_t, DebugInfoTuple> CallStackDebugInfoUnpickler::
   return callstack_ptrs;
 }
 
-} // namespace jit
-} // namespace torch
+} // namespace torch::jit

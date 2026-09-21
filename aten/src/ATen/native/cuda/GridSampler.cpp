@@ -1,5 +1,6 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/cuda/GridSampler.h>
+#include <utility>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -14,8 +15,7 @@
 #include <ATen/ops/zeros_like.h>
 #endif
 
-namespace at {
-namespace native {
+namespace at::native {
 
 Tensor grid_sampler_2d_cuda(const Tensor& input, const Tensor& grid,
                             int64_t interpolation_mode, int64_t padding_mode,
@@ -58,7 +58,7 @@ grid_sampler_2d_backward_cuda(const Tensor& grad_output, const Tensor& input,
   launch_grid_sampler_2d_backward_kernel(
       grad_input, grad_grid, grad_output, input,
       grid, interpolation_mode, padding_mode, align_corners, output_mask);
-  return std::make_tuple(grad_input, grad_grid);
+  return std::make_tuple(std::move(grad_input), std::move(grad_grid));
 }
 
 std::tuple<Tensor, Tensor>
@@ -77,7 +77,7 @@ grid_sampler_3d_backward_cuda(const Tensor& grad_output, const Tensor& input,
   launch_grid_sampler_3d_backward_kernel(
       grad_input, grad_grid, grad_output, input,
       grid, interpolation_mode, padding_mode, align_corners, output_mask);
-  return std::make_tuple(grad_input, grad_grid);
+  return std::make_tuple(std::move(grad_input), std::move(grad_grid));
 }
 
-}}  // namespace at::native
+}  // namespace at::native

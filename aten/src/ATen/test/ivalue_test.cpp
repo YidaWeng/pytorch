@@ -49,6 +49,14 @@ TEST(IValueTest, Basic) {
   ASSERT_TRUE(dlist.isNone());
   dlist = IValue(c10::List<double>({3.4}));
   ASSERT_TRUE(dlist.toDoubleVector() == std::vector<double>({3.4}));
+  dlist = IValue(std::vector<double>({3.3, 3.2}));
+  ASSERT_TRUE(dlist.toDoubleVector() == std::vector<double>({3.3, 3.2}));
+  IValue blist(std::vector<bool>{true, false});
+  ASSERT_TRUE(blist.isList());
+  const auto blistRef = blist.toListRef();
+  ASSERT_EQ(blistRef.size(), 2);
+  ASSERT_TRUE(blistRef[0].toBool());
+  ASSERT_FALSE(blistRef[1].toBool());
   IValue the_list(
       at::ivalue::Tuple::create({IValue(3.4), IValue(4), IValue(foo)}));
   ASSERT_EQ(foo.use_count(), 3);
@@ -284,14 +292,14 @@ TEST(IValueTest, TuplePrint) {
 
     std::stringstream ss;
     ss << tp;
-    ASSERT_EQ(ss.str(), "(3,)");
+    ASSERT_EQ(std::move(ss).str(), "(3,)");
   }
 
   {
     IValue tp = std::make_tuple(3, 3);
     std::stringstream ss;
     ss << tp;
-    ASSERT_EQ(ss.str(), "(3, 3)");
+    ASSERT_EQ(std::move(ss).str(), "(3, 3)");
   }
 }
 
@@ -300,21 +308,21 @@ TEST(IValueTest, ComplexIValuePrint) {
     IValue complex(c10::complex<double>(2, -3));
     std::stringstream ss;
     ss << complex;
-    ASSERT_EQ(ss.str(), "2.-3.j");
+    ASSERT_EQ(std::move(ss).str(), "2.-3.j");
   }
 
   {
     IValue complex(c10::complex<double>(2, 0));
     std::stringstream ss;
     ss << complex;
-    ASSERT_EQ(ss.str(), "2.+0.j");
+    ASSERT_EQ(std::move(ss).str(), "2.+0.j");
   }
 
   {
     IValue complex(c10::complex<double>(0, 3));
     std::stringstream ss;
     ss << complex;
-    ASSERT_EQ(ss.str(), "0.+3.j");
+    ASSERT_EQ(std::move(ss).str(), "0.+3.j");
   }
 }
 
@@ -601,6 +609,33 @@ TEST(IValueTest, isAliasOf) {
   }
 }
 
+TEST(IValueTest, toSymIntList) {
+  std::vector<int64_t> int_list = {2, 3};
+  auto iv = IValue(int_list);
+  auto result = iv.toSymIntList();
+  EXPECT_EQ(result.size(), 2);
+  EXPECT_EQ(result.get(0), 2);
+  EXPECT_EQ(result.get(1), 3);
+}
+
+TEST(IValueTest, toSymIntListTemplate) {
+  std::vector<int64_t> int_list = {2, 3};
+  auto iv = IValue(int_list);
+  auto result = iv.to<c10::List<c10::SymInt>>();
+  EXPECT_EQ(result.size(), 2);
+  EXPECT_EQ(result.get(0), 2);
+  EXPECT_EQ(result.get(1), 3);
+}
+
+TEST(IValueTest, toSymIntVector) {
+  std::vector<int64_t> int_list = {2, 3};
+  auto iv = IValue(int_list);
+  auto result = iv.to<std::vector<c10::SymInt>>();
+  EXPECT_EQ(result.size(), 2);
+  EXPECT_EQ(result[0], 2);
+  EXPECT_EQ(result[1], 3);
+}
+
 TEST(IValueTest, internalToPointer) {
   IValue tensor(at::rand({3, 4}));
   IValue str("hello");
@@ -761,7 +796,7 @@ TEST(IValueTest, getSubValues) {
 
   IValue dict(std::move(m));
 
-  auto objType = ClassType::create(nullopt, {});
+  auto objType = ClassType::create(std::nullopt, {});
   objType->addAttribute("t1", tv1.type());
   objType->addAttribute("t2", tv2.type());
 

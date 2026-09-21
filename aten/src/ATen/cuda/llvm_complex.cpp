@@ -14,8 +14,7 @@
 #include <ATen/cuda/llvm_jit_strings.h>
 
 
-namespace at {
-namespace cuda {
+namespace at::cuda {
 
 const std::string complex_body = R"ESCAPE(
 
@@ -468,33 +467,17 @@ operator==(const _Tp& __x, const complex<_Tp>& __y)
 template<class _Tp>
 inline constexpr
 bool
-operator!=(const complex<_Tp>& __x, const complex<_Tp>& __y)
-{
-    return !(__x == __y);
-}
-
-template<class _Tp>
-inline constexpr
-bool
-operator!=(const complex<_Tp>& __x, const _Tp& __y)
-{
-    return !(__x == __y);
-}
-
-template<class _Tp>
-inline constexpr
-bool
-operator!=(const _Tp& __x, const complex<_Tp>& __y)
-{
-    return !(__x == __y);
-}
-
-template<class _Tp>
-inline constexpr
-bool
 operator&&(const complex<_Tp>& __x, const complex<_Tp>& __y)
 {
     return bool(__x) && bool(__y);
+}
+
+template<class _Tp>
+inline constexpr
+bool
+isnan(const complex<_Tp>& __x)
+{
+    return isnan(__x.real()) || isnan(__x.imag());
 }
 
 template<class _Tp>
@@ -1169,4 +1152,4 @@ const std::string &get_complex_math_string() {
   return complex_math;
 }
 
-}} // namespace at::cuda
+} // namespace at::cuda

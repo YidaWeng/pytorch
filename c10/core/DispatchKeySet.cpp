@@ -1,6 +1,7 @@
 #include <c10/core/DispatchKeySet.h>
 #include <c10/util/irange.h>
-#include <iostream>
+#include <c10/util/llvmMathExtras.h>
+#include <limits>
 
 namespace c10 {
 
@@ -60,6 +61,9 @@ constexpr DispatchKeySet nested_dispatch_keyset =
         {DispatchKey::AutogradNestedTensor, DispatchKey::NestedTensor}) |
     DispatchKeySet(DispatchKeySet::RAW, full_backend_mask);
 
+constexpr DispatchKeySet functorch_batched_dispatch_keyset =
+    DispatchKeySet(DispatchKey::FuncTorchBatched);
+
 DispatchKeySet getRuntimeDispatchKeySet(DispatchKey t) {
   TORCH_INTERNAL_ASSERT(t != DispatchKey::Undefined);
   switch (t) {
@@ -78,6 +82,8 @@ DispatchKeySet getRuntimeDispatchKeySet(DispatchKey t) {
       return backend_dispatch_keyset;
     case DispatchKey::CompositeExplicitAutogradNonFunctional:
       return non_functional_backend_dispatch_keyset;
+    case DispatchKey::FuncTorchBatchedDecomposition:
+      return functorch_batched_dispatch_keyset;
     default:
       return DispatchKeySet(t);
   }
@@ -101,6 +107,8 @@ bool runtimeDispatchKeySetHas(DispatchKey t, DispatchKey k) {
       // See Note [NestedTensor Not Included in Backend Keys]
       return k != DispatchKey::NestedTensor &&
           non_functional_backend_dispatch_keyset.has(k);
+    case DispatchKey::FuncTorchBatchedDecomposition:
+      return functorch_batched_ks.has(k);
     default:
       return t == k;
   }
@@ -128,6 +136,8 @@ DispatchKeySet getBackendKeySetFromAutograd(DispatchKey t) {
       return DispatchKeySet(DispatchKey::IPU);
     case DispatchKey::AutogradXPU:
       return DispatchKeySet(DispatchKey::XPU);
+    case DispatchKey::AutogradMAIA:
+      return DispatchKeySet(DispatchKey::MAIA);
     case DispatchKey::AutogradPrivateUse1:
       return DispatchKeySet(DispatchKey::PrivateUse1);
     case DispatchKey::AutogradPrivateUse2:
@@ -151,7 +161,7 @@ bool isIncludedInAlias(DispatchKey k, DispatchKey alias) {
 std::string toString(DispatchKeySet ts) {
   std::stringstream ss;
   ss << ts;
-  return ss.str();
+  return std::move(ss).str();
 }
 
 std::ostream& operator<<(std::ostream& os, DispatchKeySet ts) {
@@ -168,7 +178,7 @@ std::ostream& operator<<(std::ostream& os, DispatchKeySet ts) {
     os << k;
     first = false;
   }
-  os << ")";
+  os << ')';
   return os;
 }
 
@@ -257,7 +267,7 @@ std::array<FunctionalityOffsetAndMask, num_functionality_keys>
 initializeFunctionalityOffsetsAndMasks() {
   std::array<FunctionalityOffsetAndMask, num_functionality_keys>
       offsets_and_masks;
-  // manualy set the first entry, which corresponds to Undefined.
+  // manually set the first entry, which corresponds to Undefined.
   offsets_and_masks[0] = FunctionalityOffsetAndMask(0, 0);
   // loop through every functionality key (aside from Undefined).
   for (const auto functionality_idx : c10::irange(1, num_functionality_keys)) {

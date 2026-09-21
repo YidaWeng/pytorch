@@ -88,6 +88,8 @@ full_codegen:
   - native_batch_norm_backward
   - native_dropout
   - native_dropout_backward
+  - native_group_norm
+  - native_group_norm_backward
   - native_layer_norm
   - native_layer_norm_backward
   - ne.Scalar
@@ -157,6 +159,7 @@ full_codegen:
   #- unbind_copy.int
   - squeeze_copy
   - squeeze_copy.dim
+  - squeeze_copy.dims
   - t_copy
   - transpose_copy.int
   - unsqueeze_copy
@@ -167,6 +170,9 @@ full_codegen:
   - slice_scatter
   - diagonal_scatter
   - as_strided_scatter
+  # random ops
+  - normal_functional
+  - uniform
 ir_gen:
   - selu
 supported:
@@ -176,7 +182,6 @@ supported:
   - empty.memory_format
   - empty_strided
   - fill_.Scalar
-  - normal_
   - max_pool3d_with_indices
   - max_pool3d_with_indices_backward
   - _to_copy
@@ -199,6 +204,7 @@ supported:
   - select_backward
   - _trilinear
   - linalg_pinv.atol_rtol_tensor
+  - svd
   - logsumexp.out
 symint:
   - empty.memory_format
@@ -217,7 +223,6 @@ symint:
   - select_backward
 autograd:
   - max_pool3d
-  - native_group_norm
 
 # Ops that don't have a native schema definitions and are dispatched within Lazy Tensor Core
 non_native:
